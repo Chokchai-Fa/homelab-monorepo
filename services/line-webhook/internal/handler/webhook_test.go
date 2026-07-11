@@ -10,6 +10,21 @@ import (
 	"line-webhook/internal/publisher"
 )
 
+func TestExtractMarkAsReadToken(t *testing.T) {
+	payload := []byte(`{"events":[{"type":"message","markAsReadToken":"tok-1"},{"type":"follow"}]}`)
+	got, err := extractMarkAsReadToken(payload, 0)
+	if err != nil {
+		t.Fatalf("extractMarkAsReadToken() error = %v", err)
+	}
+	if got != "tok-1" {
+		t.Fatalf("extractMarkAsReadToken() = %q, want %q", got, "tok-1")
+	}
+
+	if _, err := extractMarkAsReadToken(payload, 99); err != nil {
+		t.Fatalf("extractMarkAsReadToken(out of range) error = %v", err)
+	}
+}
+
 func TestIsAIRequest(t *testing.T) {
 	h := &LineHandler{cfg: &Config{AIPrefix: "/ai"}}
 
@@ -66,38 +81,6 @@ func textEvent(text string) (*linebot.Event, *linebot.TextMessage) {
 		Timestamp:  time.Now(),
 		Source:     &linebot.EventSource{UserID: "u1"},
 	}, &linebot.TextMessage{Text: text}
-}
-
-func TestChatIDFromEvent(t *testing.T) {
-	cases := []struct {
-		name  string
-		event *linebot.Event
-		want  string
-	}{
-		{
-			name:  "user chat",
-			event: &linebot.Event{Source: &linebot.EventSource{UserID: "u1"}},
-			want:  "u1",
-		},
-		{
-			name:  "room chat",
-			event: &linebot.Event{Source: &linebot.EventSource{RoomID: "r1"}},
-			want:  "r1",
-		},
-		{
-			name:  "group chat",
-			event: &linebot.Event{Source: &linebot.EventSource{GroupID: "g1"}},
-			want:  "g1",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := chatIDFromEvent(tc.event); got != tc.want {
-				t.Fatalf("chatIDFromEvent() = %q, want %q", got, tc.want)
-			}
-		})
-	}
 }
 
 func TestAISessionFlow(t *testing.T) {

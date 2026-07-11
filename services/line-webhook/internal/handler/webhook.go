@@ -1,11 +1,12 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -17,6 +18,13 @@ import (
 
 // Webhook handles incoming LINE webhook requests
 func (h *LineHandler) Webhook(c echo.Context) error {
+	body, err := io.ReadAll(c.Request().Body)
+	if err != nil {
+		log.Error().Err(err).Msg("webhook: failed to read request body")
+		return echo.NewHTTPError(http.StatusBadRequest, "Failed to read request body")
+	}
+	c.Request().Body = io.NopCloser(bytes.NewReader(body))
+
 	// request body has already been validated by middleware; parse events now
 	events, err := linebot.ParseRequest(h.cfg.ChannelSecret, c.Request())
 	if err != nil {
@@ -29,7 +37,10 @@ func (h *LineHandler) Webhook(c echo.Context) error {
 	}
 	log.Info().Int("events", len(events)).Msg("webhook: request parsed")
 
-	for _, event := range events {
+	for i, event := range events {
+		if err := h.markAsRead(body, i); err != nil {
+			log.Warn().Str("type", string(event.Type)).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to mark message as read")
+		}
 		if err := h.handleEvent(event); err != nil {
 			log.Error().Str("type", string(event.Type)).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: event handling failed")
 		}
@@ -38,61 +49,27 @@ func (h *LineHandler) Webhook(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-func (h *LineHandler) handleEvent(event *linebot.Event) error {
-	if err := h.markAsRead(event); err != nil {
-		log.Warn().Str("type", string(event.Type)).Str("chat_id", chatIDFromEvent(event)).Err(err).Msg("webhook: failed to mark message as read")
-	}
-
-	switch event.Type {
-	case linebot.EventTypeMessage:
-		switch message := event.Message.(type) {
-		case *linebot.TextMessage:
-			return h.handleTextMessage(event, message)
-		}
-	case linebot.EventTypeFollow:
-		return h.handleFollowEvent(event)
-	case linebot.EventTypeUnfollow:
-		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: user unfollowed")
-	case linebot.EventTypePostback:
-		return h.handlePostbackEvent(event)
-	}
-	return nil
-}
-
-func (h *LineHandler) markAsRead(event *linebot.Event) error {
-	if h.bot == nil || event == nil || event.Type != linebot.EventTypeMessage || h.cfg == nil {
-		return nil
-	}
-	if event.Source == nil || h.cfg.ChannelToken == "" {
+func (h *LineHandler) markAsRead(body []byte, index int) error {
+	if len(body) == 0 || index < 0 || h.cfg == nil || h.cfg.ChannelToken == "" {
 		return nil
 	}
 
-	messageID := ""
-	switch msg := event.Message.(type) {
-	case *linebot.TextMessage:
-		messageID = msg.ID
-	case *linebot.ImageMessage:
-		messageID = msg.ID
-	case *linebot.VideoMessage:
-		messageID = msg.ID
-	case *linebot.AudioMessage:
-		messageID = msg.ID
-	case *linebot.FileMessage:
-		messageID = msg.ID
-	case *linebot.LocationMessage:
-		messageID = msg.ID
-	case *linebot.StickerMessage:
-		messageID = msg.ID
-	}
-	if messageID == "" {
-		return nil
+	token, err := extractMarkAsReadToken(body, index)
+	if err != nil || token == "" {
+		return err
 	}
 
-	endpoint := fmt.Sprintf("%s/v2/bot/message/%s/markAsRead", linebot.APIEndpointBase, url.PathEscape(messageID))
-	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	payload := map[string]string{"markAsReadToken": token}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.line.me/v2/bot/chat/markAsRead", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+h.cfg.ChannelToken)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -107,17 +84,36 @@ func (h *LineHandler) markAsRead(event *linebot.Event) error {
 	return nil
 }
 
-func chatIDFromEvent(event *linebot.Event) string {
-	if event == nil || event.Source == nil {
-		return ""
+func extractMarkAsReadToken(body []byte, index int) (string, error) {
+	var payload struct {
+		Events []struct {
+			MarkAsReadToken string `json:"markAsReadToken"`
+		} `json:"events"`
 	}
-	if event.Source.UserID != "" {
-		return event.Source.UserID
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", err
 	}
-	if event.Source.RoomID != "" {
-		return event.Source.RoomID
+	if index < 0 || index >= len(payload.Events) {
+		return "", nil
 	}
-	return event.Source.GroupID
+	return payload.Events[index].MarkAsReadToken, nil
+}
+
+func (h *LineHandler) handleEvent(event *linebot.Event) error {
+	switch event.Type {
+	case linebot.EventTypeMessage:
+		switch message := event.Message.(type) {
+		case *linebot.TextMessage:
+			return h.handleTextMessage(event, message)
+		}
+	case linebot.EventTypeFollow:
+		return h.handleFollowEvent(event)
+	case linebot.EventTypeUnfollow:
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: user unfollowed")
+	case linebot.EventTypePostback:
+		return h.handlePostbackEvent(event)
+	}
+	return nil
 }
 
 func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.TextMessage) error {
@@ -171,7 +167,7 @@ func (h *LineHandler) handleAIStart(event *linebot.Event, trimmed string) error 
 
 	query := strings.TrimSpace(strings.TrimPrefix(trimmed, h.cfg.AIPrefix))
 	if query == "" {
-		return h.reply(event, "AI session started! Just type your messages - no prefix needed.\nType "+h.cfg.AIPrefix+"-end to stop (auto-ends after 10 minutes of silence).\n\nเริ่มคุยกับ AI ได้เลย พิมพ์ข้อความได้ตามปกติ ไม่ต้องใส่ "+h.cfg.AIPrefix+" แล้วน้า~")
+		return h.reply(event, "AI session started! Just type your messages - no prefix needed.\n\nType "+h.cfg.AIPrefix+"-end to stop (auto-ends after 10 minutes of silence).\n\nเริ่มคุยกับ AI ได้เลย พิมพ์ข้อความได้ตามปกติ ไม่ต้องใส่ "+h.cfg.AIPrefix+" แล้วน้า~")
 	}
 	return h.publishAIRequest(event, query)
 }

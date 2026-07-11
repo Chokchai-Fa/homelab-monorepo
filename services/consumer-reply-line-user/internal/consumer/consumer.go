@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/nats-io/nats.go"
@@ -57,24 +58,47 @@ func (c *Consumer) Handle(event ReplyEvent) {
 	}
 	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Msg("consume: reply event received")
 
-	message := linebot.NewTextMessage(event.Text)
-
-	if event.ReplyToken != "" {
-		if _, err := c.bot.ReplyMessage(event.ReplyToken, message).Do(); err == nil {
-			log.Info().Str("user_id", event.UserID).Msg("deliver: sent via reply token")
-			return
-		} else {
-			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
+	parts := splitReplyMessages(event.Text)
+	for i, part := range parts {
+		message := linebot.NewTextMessage(part)
+		if event.ReplyToken != "" {
+			if _, err := c.bot.ReplyMessage(event.ReplyToken, message).Do(); err == nil {
+				log.Info().Str("user_id", event.UserID).Int("part_index", i).Msg("deliver: sent via reply token")
+				continue
+			} else {
+				log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
+			}
 		}
+
+		if event.UserID == "" {
+			log.Error().Msg("deliver: cannot push - no user_id")
+			return
+		}
+		if _, err := c.bot.PushMessage(event.UserID, message).Do(); err != nil {
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: push message failed")
+			return
+		}
+		log.Info().Str("user_id", event.UserID).Int("part_index", i).Msg("deliver: sent via push message")
+	}
+}
+
+func splitReplyMessages(text string) []string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
 	}
 
-	if event.UserID == "" {
-		log.Error().Msg("deliver: cannot push - no user_id")
-		return
+	parts := strings.Split(trimmed, "\n\n")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result = append(result, part)
 	}
-	if _, err := c.bot.PushMessage(event.UserID, message).Do(); err != nil {
-		log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: push message failed")
-		return
+	if len(result) == 0 {
+		return []string{trimmed}
 	}
-	log.Info().Str("user_id", event.UserID).Msg("deliver: sent via push message")
+	return result
 }
