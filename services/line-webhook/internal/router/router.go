@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/line/line-bot-sdk-go/v7/linebot"
 
 	"line-webhook/internal/handler"
 )
@@ -20,6 +21,7 @@ type RouterOptions struct {
 	Config    *handler.Config
 	Publisher handler.EventPublisher
 	Sessions  handler.SessionStore
+	Bot       *linebot.Client
 }
 
 func NewRouter(opts RouterOptions) *echo.Echo {
@@ -34,7 +36,7 @@ func NewRouter(opts RouterOptions) *echo.Echo {
 	e.Use(middleware.CORS())
 
 	// Routes
-	h := handler.New(opts.Config, opts.Publisher, opts.Sessions)
+	h := handler.New(opts.Config, opts.Publisher, opts.Sessions, opts.Bot)
 	// Health check
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{

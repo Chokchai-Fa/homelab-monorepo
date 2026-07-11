@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
@@ -17,6 +18,7 @@ import (
 
 type Config struct {
 	ChannelSecret string
+	ChannelToken  string
 	NatsURL       string
 	NatsUser      string
 	NatsPassword  string
@@ -39,6 +41,7 @@ func loadConfig() *Config {
 	}
 	return &Config{
 		ChannelSecret: getEnv("LINE_CHANNEL_SECRET", ""),
+		ChannelToken:  getEnv("LINE_CHANNEL_ACCESS_TOKEN", ""),
 		NatsURL:       getEnv("NATS_URL", ""),
 		NatsUser:      getEnv("NATS_USER", ""),
 		NatsPassword:  getEnv("NATS_PASSWORD", ""),
@@ -105,12 +108,24 @@ func main() {
 		log.Info().Msg("startup: REDIS_ADDR not set - AI session mode disabled (prefix-only)")
 	}
 
+	var bot *linebot.Client
+	if config.ChannelSecret != "" && config.ChannelToken != "" {
+		var err error
+		bot, err = linebot.New(config.ChannelSecret, config.ChannelToken)
+		if err != nil {
+			log.Error().Err(err).Msg("startup: failed to initialize LINE bot client")
+		} else {
+			log.Info().Msg("startup: LINE bot client ready")
+		}
+	}
+
 	// Initialize Echo via router package and start server
 	e := router.NewRouter(router.RouterOptions{
 		Echo:      nil, // router will create a new Echo instance if nil
-		Config:    &handler.Config{ChannelSecret: config.ChannelSecret, AIPrefix: config.AIPrefix},
+		Config:    &handler.Config{ChannelSecret: config.ChannelSecret, ChannelToken: config.ChannelToken, AIPrefix: config.AIPrefix},
 		Publisher: pub,
 		Sessions:  sessions,
+		Bot:       bot,
 	})
 
 	log.Info().Str("port", config.Port).Msg("startup: server starting")

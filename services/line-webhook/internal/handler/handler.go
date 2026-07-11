@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/labstack/echo/v4"
+	"github.com/line/line-bot-sdk-go/v7/linebot"
 
 	"line-webhook/internal/publisher"
 )
@@ -15,11 +16,13 @@ type LineHandler struct {
 	cfg      *Config
 	pub      EventPublisher
 	sessions SessionStore
+	bot      *linebot.Client
 }
 
 // Config holds configuration for the handler.
 type Config struct {
 	ChannelSecret string
+	ChannelToken  string
 	// AIPrefix starts an AI session (e.g. "/ai"); AIPrefix+"-end" ends it.
 	AIPrefix string
 }
@@ -46,6 +49,6 @@ type EventPublisher interface {
 }
 
 // New creates a new LineHandler instance that implements Handler.
-func New(cfg *Config, pub EventPublisher, sessions SessionStore) Handler {
-	return &LineHandler{cfg: cfg, pub: pub, sessions: sessions}
+func New(cfg *Config, pub EventPublisher, sessions SessionStore, bot *linebot.Client) Handler {
+	return &LineHandler{cfg: cfg, pub: pub, sessions: sessions, bot: bot}
 }

@@ -68,6 +68,38 @@ func textEvent(text string) (*linebot.Event, *linebot.TextMessage) {
 	}, &linebot.TextMessage{Text: text}
 }
 
+func TestChatIDFromEvent(t *testing.T) {
+	cases := []struct {
+		name  string
+		event *linebot.Event
+		want  string
+	}{
+		{
+			name:  "user chat",
+			event: &linebot.Event{Source: &linebot.EventSource{UserID: "u1"}},
+			want:  "u1",
+		},
+		{
+			name:  "room chat",
+			event: &linebot.Event{Source: &linebot.EventSource{RoomID: "r1"}},
+			want:  "r1",
+		},
+		{
+			name:  "group chat",
+			event: &linebot.Event{Source: &linebot.EventSource{GroupID: "g1"}},
+			want:  "g1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := chatIDFromEvent(tc.event); got != tc.want {
+				t.Fatalf("chatIDFromEvent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAISessionFlow(t *testing.T) {
 	pub := &fakePublisher{}
 	sessions := &fakeSessions{active: map[string]bool{}}

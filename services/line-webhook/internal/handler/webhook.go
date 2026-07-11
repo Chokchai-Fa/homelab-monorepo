@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -34,10 +35,14 @@ func (h *LineHandler) Webhook(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	return c.NoContent(http.StatusOK)
 }
 
 func (h *LineHandler) handleEvent(event *linebot.Event) error {
+	if err := h.markAsRead(event); err != nil {
+		log.Warn().Str("type", string(event.Type)).Str("chat_id", chatIDFromEvent(event)).Err(err).Msg("webhook: failed to mark message as read")
+	}
+
 	switch event.Type {
 	case linebot.EventTypeMessage:
 		switch message := event.Message.(type) {
@@ -52,6 +57,67 @@ func (h *LineHandler) handleEvent(event *linebot.Event) error {
 		return h.handlePostbackEvent(event)
 	}
 	return nil
+}
+
+func (h *LineHandler) markAsRead(event *linebot.Event) error {
+	if h.bot == nil || event == nil || event.Type != linebot.EventTypeMessage || h.cfg == nil {
+		return nil
+	}
+	if event.Source == nil || h.cfg.ChannelToken == "" {
+		return nil
+	}
+
+	messageID := ""
+	switch msg := event.Message.(type) {
+	case *linebot.TextMessage:
+		messageID = msg.ID
+	case *linebot.ImageMessage:
+		messageID = msg.ID
+	case *linebot.VideoMessage:
+		messageID = msg.ID
+	case *linebot.AudioMessage:
+		messageID = msg.ID
+	case *linebot.FileMessage:
+		messageID = msg.ID
+	case *linebot.LocationMessage:
+		messageID = msg.ID
+	case *linebot.StickerMessage:
+		messageID = msg.ID
+	}
+	if messageID == "" {
+		return nil
+	}
+
+	endpoint := fmt.Sprintf("%s/v2/bot/message/%s/markAsRead", linebot.APIEndpointBase, url.PathEscape(messageID))
+	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+h.cfg.ChannelToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("mark as read failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func chatIDFromEvent(event *linebot.Event) string {
+	if event == nil || event.Source == nil {
+		return ""
+	}
+	if event.Source.UserID != "" {
+		return event.Source.UserID
+	}
+	if event.Source.RoomID != "" {
+		return event.Source.RoomID
+	}
+	return event.Source.GroupID
 }
 
 func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.TextMessage) error {
