@@ -1,14 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
+	"github.com/rs/zerolog/log"
 
 	"line-webhook/internal/publisher"
 )
@@ -16,19 +17,20 @@ import (
 // Webhook handles incoming LINE webhook requests
 func (h *LineHandler) Webhook(c echo.Context) error {
 	// request body has already been validated by middleware; parse events now
-
-	log.Printf("Request: %v", c.Request())
 	events, err := linebot.ParseRequest(h.cfg.ChannelSecret, c.Request())
 	if err != nil {
 		if err == linebot.ErrInvalidSignature {
+			log.Error().Err(err).Msg("webhook: invalid signature")
 			return echo.NewHTTPError(http.StatusUnauthorized, "Invalid signature")
 		}
+		log.Error().Err(err).Msg("webhook: failed to parse request")
 		return echo.NewHTTPError(http.StatusBadRequest, "Failed to parse request")
 	}
+	log.Info().Int("events", len(events)).Msg("webhook: request parsed")
 
 	for _, event := range events {
 		if err := h.handleEvent(event); err != nil {
-			log.Printf("Error handling event: %v", err)
+			log.Error().Str("type", string(event.Type)).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: event handling failed")
 		}
 	}
 
@@ -45,7 +47,7 @@ func (h *LineHandler) handleEvent(event *linebot.Event) error {
 	case linebot.EventTypeFollow:
 		return h.handleFollowEvent(event)
 	case linebot.EventTypeUnfollow:
-		log.Printf("User %s unfollowed the bot", event.Source.UserID)
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: user unfollowed")
 	case linebot.EventTypePostback:
 		return h.handlePostbackEvent(event)
 	}
@@ -54,10 +56,21 @@ func (h *LineHandler) handleEvent(event *linebot.Event) error {
 
 func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.TextMessage) error {
 	userMessage := message.Text
-	log.Printf("Received text message: %s from user: %s", userMessage, event.Source.UserID)
+	trimmed := strings.TrimSpace(userMessage)
+	log.Info().Str("user_id", event.Source.UserID).Str("text", userMessage).Msg("webhook: text message received")
 
+	// AI session lifecycle: "/ai" starts a session (messages flow to the AI
+	// without any prefix), "/ai-end" ends it, and it auto-expires after the
+	// session TTL of inactivity.
+	if trimmed == h.cfg.AIPrefix+"-end" {
+		return h.handleAIEnd(event)
+	}
 	if h.isAIRequest(userMessage) {
-		return h.handleAIRequest(event, userMessage)
+		return h.handleAIStart(event, trimmed)
+	}
+	if h.sessions != nil && event.Source.UserID != "" && h.sessions.Active(context.Background(), event.Source.UserID) {
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: active AI session - routing message to AI")
+		return h.publishAIRequest(event, trimmed)
 	}
 
 	replyMessage := fmt.Sprintf("You said: %s", userMessage)
@@ -66,7 +79,7 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	case "hello", "Hello", "hi", "Hi":
 		replyMessage = "Hello! How can I help you today?"
 	case "help", "Help":
-		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- " + h.cfg.AIPrefix + " <question>: Ask the AI assistant (any language)\n- " + h.cfg.AIPrefix + " reset: Clear your AI conversation history\n- Any other message will be echoed back."
+		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- " + h.cfg.AIPrefix + " <question>: Start an AI session and ask (any language). While the session is active, every message goes to the AI.\n- " + h.cfg.AIPrefix + "-end: End the AI session (it also ends after 10 minutes of silence)\n- " + h.cfg.AIPrefix + " reset: Clear your AI conversation history\n- Any other message will be echoed back."
 	}
 
 	return h.reply(event, replyMessage)
@@ -79,15 +92,44 @@ func (h *LineHandler) isAIRequest(text string) bool {
 	return trimmed == h.cfg.AIPrefix || strings.HasPrefix(trimmed, h.cfg.AIPrefix+" ")
 }
 
-// handleAIRequest publishes the message to NATS for consumer-llm-processor,
+// handleAIStart opens (or refreshes) the user's AI session and forwards the
+// question, if any, to consumer-llm-processor.
+func (h *LineHandler) handleAIStart(event *linebot.Event, trimmed string) error {
+	if h.sessions != nil && event.Source.UserID != "" {
+		if err := h.sessions.Start(context.Background(), event.Source.UserID); err != nil {
+			log.Error().Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to start AI session - prefix still works per message")
+		} else {
+			log.Info().Str("user_id", event.Source.UserID).Msg("webhook: AI session started")
+		}
+	}
+
+	query := strings.TrimSpace(strings.TrimPrefix(trimmed, h.cfg.AIPrefix))
+	if query == "" {
+		return h.reply(event, "AI session started! Just type your messages - no prefix needed.\nType "+h.cfg.AIPrefix+"-end to stop (auto-ends after 10 minutes of silence).\n\nเริ่มคุยกับ AI ได้เลย พิมพ์ข้อความได้ตามปกติ ไม่ต้องใส่ "+h.cfg.AIPrefix+" แล้วน้า~")
+	}
+	return h.publishAIRequest(event, query)
+}
+
+// handleAIEnd closes the user's AI session.
+func (h *LineHandler) handleAIEnd(event *linebot.Event) error {
+	if h.sessions != nil && event.Source.UserID != "" {
+		if err := h.sessions.End(context.Background(), event.Source.UserID); err != nil {
+			log.Error().Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to end AI session")
+			return h.reply(event, "Sorry, I couldn't end the AI session. Please try again.")
+		}
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: AI session ended")
+	}
+	return h.reply(event, "AI session ended. Type "+h.cfg.AIPrefix+" to start a new one.\nจบการคุยกับ AI แล้ว พิมพ์ "+h.cfg.AIPrefix+" เพื่อเริ่มใหม่ได้เลย")
+}
+
+// publishAIRequest sends the question to NATS for consumer-llm-processor,
 // which answers through consumer-reply-line-user using the reply token.
-func (h *LineHandler) handleAIRequest(event *linebot.Event, userMessage string) error {
+func (h *LineHandler) publishAIRequest(event *linebot.Event, query string) error {
 	if h.pub == nil {
-		log.Printf("AI request from %s dropped: NATS publisher not connected", event.Source.UserID)
+		log.Error().Str("user_id", event.Source.UserID).Msg("webhook: AI request dropped - NATS publisher not connected")
 		return nil
 	}
 
-	query := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(userMessage), h.cfg.AIPrefix))
 	err := h.pub.PublishAIRequest(publisher.AIRequestEvent{
 		UserID:     event.Source.UserID,
 		ReplyToken: event.ReplyToken,
@@ -95,17 +137,17 @@ func (h *LineHandler) handleAIRequest(event *linebot.Event, userMessage string) 
 		Timestamp:  event.Timestamp.UnixMilli(),
 	})
 	if err == nil {
-		log.Printf("Published AI request for user %s", event.Source.UserID)
+		log.Info().Str("subject", publisher.AIRequestSubject).Str("user_id", event.Source.UserID).Msg("webhook: AI request published")
 		return nil
 	}
-	log.Printf("Failed to publish AI request for %s: %v", event.Source.UserID, err)
+	log.Error().Str("subject", publisher.AIRequestSubject).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to publish AI request")
 
 	unavailable := "Sorry, the AI assistant is unavailable right now. Please try again later.\nขออภัย ตอนนี้ผู้ช่วย AI ไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง"
 	return h.reply(event, unavailable)
 }
 
 func (h *LineHandler) handleFollowEvent(event *linebot.Event) error {
-	log.Printf("User %s followed the bot", event.Source.UserID)
+	log.Info().Str("user_id", event.Source.UserID).Msg("webhook: user followed")
 
 	welcomeMessage := "Welcome! Thank you for adding me as a friend. \n\nSend me any message and I'll echo it back to you!\n\nType 'help' to see available commands."
 
@@ -114,11 +156,11 @@ func (h *LineHandler) handleFollowEvent(event *linebot.Event) error {
 
 func (h *LineHandler) handlePostbackEvent(event *linebot.Event) error {
 	postback := event.Postback
-	log.Printf("Received postback: %s from user: %s", postback.Data, event.Source.UserID)
+	log.Info().Str("user_id", event.Source.UserID).Str("data", postback.Data).Msg("webhook: postback received")
 
 	var response map[string]interface{}
 	if err := json.Unmarshal([]byte(postback.Data), &response); err != nil {
-		log.Printf("Failed to parse postback data: %v", err)
+		log.Error().Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to parse postback data")
 		return nil
 	}
 
@@ -128,12 +170,17 @@ func (h *LineHandler) handlePostbackEvent(event *linebot.Event) error {
 // reply publishes an outgoing message for consumer-reply-line-user to send.
 func (h *LineHandler) reply(event *linebot.Event, text string) error {
 	if h.pub == nil {
-		log.Printf("Reply to %s dropped: NATS publisher not connected", event.Source.UserID)
+		log.Error().Str("user_id", event.Source.UserID).Msg("webhook: reply dropped - NATS publisher not connected")
 		return nil
 	}
-	return h.pub.PublishReply(publisher.ReplyEvent{
+	if err := h.pub.PublishReply(publisher.ReplyEvent{
 		UserID:     event.Source.UserID,
 		ReplyToken: event.ReplyToken,
 		Text:       text,
-	})
+	}); err != nil {
+		log.Error().Str("subject", publisher.ReplySubject).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to publish reply")
+		return err
+	}
+	log.Info().Str("subject", publisher.ReplySubject).Str("user_id", event.Source.UserID).Msg("webhook: reply published")
+	return nil
 }

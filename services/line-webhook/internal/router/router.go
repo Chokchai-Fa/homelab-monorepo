@@ -19,6 +19,7 @@ type RouterOptions struct {
 	Echo      *echo.Echo
 	Config    *handler.Config
 	Publisher handler.EventPublisher
+	Sessions  handler.SessionStore
 }
 
 func NewRouter(opts RouterOptions) *echo.Echo {
@@ -33,7 +34,7 @@ func NewRouter(opts RouterOptions) *echo.Echo {
 	e.Use(middleware.CORS())
 
 	// Routes
-	h := handler.New(opts.Config, opts.Publisher)
+	h := handler.New(opts.Config, opts.Publisher, opts.Sessions)
 	// Health check
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +9,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 
 	"consumer-reply-line-user/internal/consumer"
 )
@@ -41,18 +41,19 @@ func getEnv(key, defaultValue string) string {
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Printf(".env not found or failed to load: %v", err)
+		log.Info().Err(err).Msg("startup: .env not loaded")
 	}
 
 	config := loadConfig()
 	if config.ChannelSecret == "" || config.ChannelToken == "" {
-		log.Fatal("LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN must be set")
+		log.Fatal().Msg("startup: LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN must be set")
 	}
 
 	bot, err := linebot.New(config.ChannelSecret, config.ChannelToken)
 	if err != nil {
-		log.Fatalf("Failed to init LINE client: %v", err)
+		log.Fatal().Err(err).Msg("startup: failed to init LINE client")
 	}
+	log.Info().Msg("startup: LINE client ready")
 
 	nc, err := nats.Connect(config.NatsURL,
 		nats.UserInfo(config.NatsUser, config.NatsPassword),
@@ -61,21 +62,22 @@ func main() {
 		nats.ReconnectWait(2*time.Second),
 	)
 	if err != nil {
-		log.Fatalf("Failed to connect to NATS at %s: %v", config.NatsURL, err)
+		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
 	}
 	defer nc.Drain()
+	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
 	c := consumer.New(bot)
 	sub, err := c.Subscribe(nc)
 	if err != nil {
-		log.Fatalf("Failed to subscribe to %s: %v", consumer.Subject, err)
+		log.Fatal().Str("subject", consumer.Subject).Err(err).Msg("startup: failed to subscribe")
 	}
 	defer sub.Unsubscribe()
-	log.Printf("Subscribed to %s (queue %s)", consumer.Subject, consumer.QueueGroup)
+	log.Info().Str("subject", consumer.Subject).Str("queue", consumer.QueueGroup).Msg("startup: subscribed - consumer running")
 
 	// Pure consumer: no HTTP server, just block until asked to shut down.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
-	log.Printf("Received %s, shutting down", s)
+	log.Info().Str("signal", s.String()).Msg("shutdown: signal received")
 }

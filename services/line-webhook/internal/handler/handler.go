@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+
 	"github.com/labstack/echo/v4"
 
 	"line-webhook/internal/publisher"
@@ -10,15 +12,24 @@ import (
 // It never calls the LINE API itself: every outgoing message is published to
 // NATS and delivered by consumer-reply-line-user.
 type LineHandler struct {
-	cfg *Config
-	pub EventPublisher
+	cfg      *Config
+	pub      EventPublisher
+	sessions SessionStore
 }
 
 // Config holds configuration for the handler.
 type Config struct {
 	ChannelSecret string
-	// AIPrefix marks a message as an AI request (e.g. "/ai").
+	// AIPrefix starts an AI session (e.g. "/ai"); AIPrefix+"-end" ends it.
 	AIPrefix string
+}
+
+// SessionStore tracks which users are in an active AI session; nil disables
+// session mode (only the explicit prefix routes to the AI).
+type SessionStore interface {
+	Start(ctx context.Context, userID string) error
+	Active(ctx context.Context, userID string) bool
+	End(ctx context.Context, userID string) error
 }
 
 // Handler defines the public behavior for a webhook handler.
@@ -35,6 +46,6 @@ type EventPublisher interface {
 }
 
 // New creates a new LineHandler instance that implements Handler.
-func New(cfg *Config, pub EventPublisher) Handler {
-	return &LineHandler{cfg: cfg, pub: pub}
+func New(cfg *Config, pub EventPublisher, sessions SessionStore) Handler {
+	return &LineHandler{cfg: cfg, pub: pub, sessions: sessions}
 }

@@ -2,10 +2,10 @@ package consumer
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 // Subject and QueueGroup must match the publisher in
@@ -15,7 +15,7 @@ const (
 	QueueGroup = "consumer-reply-line-user"
 )
 
-// ReplyEvent is published by consumer-llm-processor.
+// ReplyEvent is published by line-webhook and consumer-llm-processor.
 type ReplyEvent struct {
 	UserID     string `json:"user_id"`
 	ReplyToken string `json:"reply_token"`
@@ -37,7 +37,7 @@ func (c *Consumer) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
 	return nc.QueueSubscribe(Subject, QueueGroup, func(msg *nats.Msg) {
 		var event ReplyEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
-			log.Printf("Failed to unmarshal event: %v", err)
+			log.Error().Str("subject", Subject).Err(err).Msg("consume: failed to unmarshal event")
 			return
 		}
 		c.Handle(event)
@@ -48,31 +48,33 @@ func (c *Consumer) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
 // or was already consumed, falls back to a push message.
 func (c *Consumer) Handle(event ReplyEvent) {
 	if event.UserID == "" && event.ReplyToken == "" {
-		log.Printf("Dropping event without user_id or reply_token")
+		log.Error().Str("subject", Subject).Msg("consume: dropping event without user_id or reply_token")
 		return
 	}
 	if event.Text == "" {
-		log.Printf("Dropping empty reply for user %s", event.UserID)
+		log.Error().Str("user_id", event.UserID).Msg("consume: dropping empty reply")
 		return
 	}
+	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Msg("consume: reply event received")
 
 	message := linebot.NewTextMessage(event.Text)
 
 	if event.ReplyToken != "" {
 		if _, err := c.bot.ReplyMessage(event.ReplyToken, message).Do(); err == nil {
-			log.Printf("Replied to user %s via reply token", event.UserID)
+			log.Info().Str("user_id", event.UserID).Msg("deliver: sent via reply token")
 			return
 		} else {
-			log.Printf("ReplyMessage failed for %s, falling back to push: %v", event.UserID, err)
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
 		}
 	}
 
 	if event.UserID == "" {
+		log.Error().Msg("deliver: cannot push - no user_id")
 		return
 	}
 	if _, err := c.bot.PushMessage(event.UserID, message).Do(); err != nil {
-		log.Printf("PushMessage failed for %s: %v", event.UserID, err)
+		log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: push message failed")
 		return
 	}
-	log.Printf("Replied to user %s via push message", event.UserID)
+	log.Info().Str("user_id", event.UserID).Msg("deliver: sent via push message")
 }

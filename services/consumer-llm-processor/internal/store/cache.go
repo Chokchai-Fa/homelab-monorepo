@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"github.com/rs/zerolog/log"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -39,9 +39,9 @@ func (c *CachedStore) GetRecent(ctx context.Context, userID string) ([]Message, 
 		if err := json.Unmarshal(data, &messages); err == nil {
 			return messages, nil
 		}
-		log.Printf("Corrupt cache entry for %s, reloading from backend", userID)
+		log.Error().Str("user_id", userID).Msg("cache: corrupt entry - reloading from backend")
 	} else if err != redis.Nil {
-		log.Printf("Redis get failed for %s, falling back to backend: %v", userID, err)
+		log.Error().Str("user_id", userID).Err(err).Msg("cache: redis get failed - falling back to backend")
 	}
 
 	messages, err := c.backend.GetRecent(ctx, userID)
@@ -63,7 +63,7 @@ func (c *CachedStore) Append(ctx context.Context, userID, role, content string) 
 	data, err := c.redis.Get(ctx, key).Bytes()
 	if err != nil {
 		if err != redis.Nil {
-			log.Printf("Redis get failed for %s during append: %v", userID, err)
+			log.Error().Str("user_id", userID).Err(err).Msg("cache: redis get failed during append")
 		}
 		return nil
 	}
@@ -85,14 +85,14 @@ func (c *CachedStore) Clear(ctx context.Context, userID string) error {
 		return err
 	}
 	if err := c.redis.Del(ctx, cacheKey(userID)).Err(); err != nil {
-		log.Printf("Redis del failed for %s: %v", userID, err)
+		log.Error().Str("user_id", userID).Err(err).Msg("cache: redis del failed")
 	}
 	return nil
 }
 
 func (c *CachedStore) Close() {
 	if err := c.redis.Close(); err != nil {
-		log.Printf("Redis close failed: %v", err)
+		log.Error().Err(err).Msg("cache: redis close failed")
 	}
 	c.backend.Close()
 }
@@ -103,6 +103,6 @@ func (c *CachedStore) setCache(ctx context.Context, userID string, messages []Me
 		return
 	}
 	if err := c.redis.Set(ctx, cacheKey(userID), data, c.ttl).Err(); err != nil {
-		log.Printf("Redis set failed for %s: %v", userID, err)
+		log.Error().Str("user_id", userID).Err(err).Msg("cache: redis set failed")
 	}
 }
