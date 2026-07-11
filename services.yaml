@@ -1,0 +1,50 @@
+# Service registry — the single source of truth for the build pipeline.
+#
+# Each entry drives BOTH change-detection (scripts/select-services.sh) and the
+# GitHub Actions build matrix (.github/workflows/build-and-push.yml).
+#
+# Fields:
+#   name        logical service name (used in CI / must match the Flux app name)
+#   image       Docker Hub repository name -> docker.io/<DOCKER_USERNAME>/<image>
+#               (MUST stay identical to what Flux ImageRepository watches)
+#   context     Docker build context (the service source dir)
+#   dockerfile  SHARED, per-stack Dockerfile under build/ (reused across services)
+#   versionFile file holding the semver base (e.g. 1.0.0); CI appends -<run>.<sha>
+#   platforms   buildx target platforms
+#   buildArgs   passed to the shared Dockerfile as --build-arg
+#   test        optional test command run before build ("" to skip)
+#   paths       globs; a push touching any of these rebuilds this service.
+#               Always include the shared Dockerfile dir so editing it rebuilds
+#               every service on that stack.
+#
+# Add a new Go service: drop source in services/<svc>/, add a VERSION file, and
+# append a block below pointing at build/go/Dockerfile. No new Dockerfile needed.
+services:
+  - name: portfolio-web
+    image: chokchai-portfolio
+    context: apps/portfolio-web
+    dockerfile: build/node-next/Dockerfile
+    versionFile: apps/portfolio-web/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      NODE_VERSION: "18"
+      PORT: "3000"
+    test: ""
+    paths:
+      - "apps/portfolio-web/**"
+      - "build/node-next/**"
+
+  - name: line-webhook
+    image: line-webhook
+    context: services/line-webhook
+    dockerfile: build/go/Dockerfile
+    versionFile: services/line-webhook/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      GO_VERSION: "1.23"
+      MAIN_PATH: "./"
+      PORT: "8080"
+    test: "go test ./..."
+    paths:
+      - "services/line-webhook/**"
+      - "build/go/**"

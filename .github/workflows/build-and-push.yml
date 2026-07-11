@@ -1,0 +1,118 @@
+name: build-and-push
+
+# Build Docker images for services and push to Docker Hub.
+# CD is handled separately by homelab-flux-controller (Flux image-automation),
+# which auto-deploys any pushed tag matching ^v[0-9]+\.[0-9]+\.[0-9]+.*$
+#
+# Triggers:
+#   push (any branch)   -> build only the services whose files changed.
+#                          A merge/PR into main IS a push to main, so merging to
+#                          main fires this too and deploys the changed services.
+#   workflow_dispatch   -> build on demand, no merge: pick branch/tag + service(s)
+on:
+  push:
+    branches: ['**']   # includes main; a merge to main = push to main
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Services to build: "all" or comma-separated names (e.g. "line-webhook,portfolio-web")'
+        required: false
+        default: all
+      ref:
+        description: 'Branch or tag to build from (defaults to the selected ref)'
+        required: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select services
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      count: ${{ steps.select.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Select services -> build matrix
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SERVICES: ${{ github.event.inputs.services }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: bash scripts/select-services.sh
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: select
+    if: ${{ needs.select.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Go (for Go tests)
+        if: ${{ matrix.test != '' && startsWith(matrix.test, 'go') }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.context }}/go.mod
+
+      - name: Set up Node (for Node tests)
+        if: ${{ matrix.test != '' && contains(matrix.test, 'npm') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Run tests
+        if: ${{ matrix.test != '' }}
+        working-directory: ${{ matrix.context }}
+        run: ${{ matrix.test }}
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          VERSION="$(tr -d '[:space:]' < '${{ matrix.versionFile }}')"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TAG="v${VERSION}-${GITHUB_RUN_NUMBER}.${SHORT_SHA}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: ${{ matrix.image }}:${TAG}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          build-args: ${{ matrix.buildArgsStr }}
+          push: true
+          tags: docker.io/${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max

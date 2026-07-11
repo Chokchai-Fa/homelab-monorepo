@@ -1,0 +1,22 @@
+# Secrets — never commit real env files
+.env
+**/.env
+!**/.env.example
+
+# Node
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Go
+**/bin/
+*.test
+*.out
+
+# OS / editor
+.DS_Store
+*.swp
