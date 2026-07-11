@@ -5,22 +5,28 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
-	"github.com/line/line-bot-sdk-go/v7/linebot"
 
 	"line-webhook/internal/handler"
+	"line-webhook/internal/publisher"
 	"line-webhook/internal/router"
 )
 
 type Config struct {
 	ChannelSecret string
-	ChannelToken  string
+	NatsURL       string
+	NatsUser      string
+	NatsPassword  string
+	AIPrefix      string
 	Port          string
 }
 
 func loadConfig() *Config {
 	return &Config{
 		ChannelSecret: getEnv("LINE_CHANNEL_SECRET", ""),
-		ChannelToken:  getEnv("LINE_CHANNEL_ACCESS_TOKEN", ""),
+		NatsURL:       getEnv("NATS_URL", ""),
+		NatsUser:      getEnv("NATS_USER", ""),
+		NatsPassword:  getEnv("NATS_PASSWORD", ""),
+		AIPrefix:      getEnv("AI_PREFIX", "/ai"),
 		Port:          getEnv("PORT", "8080"),
 	}
 }
@@ -39,21 +45,32 @@ func main() {
 
 	config := loadConfig()
 
-	if config.ChannelSecret == "" || config.ChannelToken == "" {
-		log.Fatal("LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN must be set")
+	if config.ChannelSecret == "" {
+		log.Fatal("LINE_CHANNEL_SECRET must be set")
 	}
 
-	// Initialize LINE Bot client
-	bot, err := linebot.New(config.ChannelSecret, config.ChannelToken)
-	if err != nil {
-		log.Fatal(err)
+	// NATS publisher: the webhook never replies to LINE itself, it only
+	// produces events (AI requests and replies) for the downstream consumers.
+	// Non-fatal on failure so the webhook keeps accepting LINE events.
+	var pub handler.EventPublisher
+	if config.NatsURL != "" {
+		p, err := publisher.New(config.NatsURL, config.NatsUser, config.NatsPassword)
+		if err != nil {
+			log.Printf("NATS unavailable at %s (incoming messages will be dropped): %v", config.NatsURL, err)
+		} else {
+			defer p.Close()
+			pub = p
+			log.Printf("Connected to NATS at %s", config.NatsURL)
+		}
+	} else {
+		log.Printf("NATS_URL not set; incoming messages will be dropped")
 	}
 
 	// Initialize Echo via router package and start server
 	e := router.NewRouter(router.RouterOptions{
-		Echo:   nil, // router will create a new Echo instance if nil
-		Config: &handler.Config{ChannelSecret: config.ChannelSecret},
-		Bot:    bot,
+		Echo:      nil, // router will create a new Echo instance if nil
+		Config:    &handler.Config{ChannelSecret: config.ChannelSecret, AIPrefix: config.AIPrefix},
+		Publisher: pub,
 	})
 
 	log.Printf("Starting server on port %s", config.Port)
