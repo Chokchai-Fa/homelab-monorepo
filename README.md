@@ -52,6 +52,8 @@ newest build. Bump `VERSION` for a meaningful release.
 | --- | --- | --- | --- | --- |
 | `portfolio-web` | Next.js 14 (standalone) | `chokchaifa/chokchai-portfolio` | 3000 | migrated from `chokchai-portfolio` |
 | `line-webhook` | Go 1.23 (Echo) | `chokchaifa/line-webhook` | 8080 | needs `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` at runtime (k8s Secret in flux repo) |
+| `consumer-llm-processor` | Go 1.23 | `chokchaifa/consumer-llm-processor` | — | NATS consumer for Gemini-backed AI replies; needs `GEMINI_API_KEY` + `DATABASE_URL` |
+| `consumer-reply-line-user` | Go 1.23 | `chokchaifa/consumer-reply-line-user` | — | NATS consumer for LINE delivery; needs channel credentials |
 
 ## Required GitHub secrets
 
