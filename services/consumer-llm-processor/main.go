@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"log"
-	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 
@@ -33,7 +32,6 @@ type Config struct {
 	RedisAddr     string
 	RedisUsername string
 	RedisPassword string
-	Port          string
 }
 
 func loadConfig() *Config {
@@ -47,7 +45,6 @@ func loadConfig() *Config {
 		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisUsername: getEnv("REDIS_USERNAME", ""),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
-		Port:          getEnv("PORT", "8080"),
 	}
 }
 
@@ -112,21 +109,9 @@ func main() {
 	log.Printf("Subscribed to %s (queue %s), model %s, replies to %s",
 		consumer.RequestSubject, consumer.QueueGroup, config.GeminiModel, consumer.ReplySubject)
 
-	// Health endpoint for k8s probes.
-	e := echo.New()
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-	e.GET("/health", func(c echo.Context) error {
-		if !nc.IsConnected() {
-			return c.JSON(http.StatusServiceUnavailable, map[string]string{
-				"status": "degraded", "message": "NATS disconnected",
-			})
-		}
-		return c.JSON(http.StatusOK, map[string]string{
-			"status": "ok", "message": "LLM processor consumer is running",
-		})
-	})
-
-	log.Printf("Starting server on port %s", config.Port)
-	e.Logger.Fatal(e.Start(":" + config.Port))
+	// Pure consumer: no HTTP server, just block until asked to shut down.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	s := <-sig
+	log.Printf("Received %s, shutting down", s)
 }

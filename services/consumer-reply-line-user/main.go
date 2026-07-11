@@ -2,13 +2,12 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/nats-io/nats.go"
 
@@ -21,7 +20,6 @@ type Config struct {
 	NatsPassword  string
 	ChannelSecret string
 	ChannelToken  string
-	Port          string
 }
 
 func loadConfig() *Config {
@@ -31,7 +29,6 @@ func loadConfig() *Config {
 		NatsPassword:  getEnv("NATS_PASSWORD", ""),
 		ChannelSecret: getEnv("LINE_CHANNEL_SECRET", ""),
 		ChannelToken:  getEnv("LINE_CHANNEL_ACCESS_TOKEN", ""),
-		Port:          getEnv("PORT", "8080"),
 	}
 }
 
@@ -76,21 +73,9 @@ func main() {
 	defer sub.Unsubscribe()
 	log.Printf("Subscribed to %s (queue %s)", consumer.Subject, consumer.QueueGroup)
 
-	// Health endpoint for k8s probes.
-	e := echo.New()
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-	e.GET("/health", func(c echo.Context) error {
-		if !nc.IsConnected() {
-			return c.JSON(http.StatusServiceUnavailable, map[string]string{
-				"status": "degraded", "message": "NATS disconnected",
-			})
-		}
-		return c.JSON(http.StatusOK, map[string]string{
-			"status": "ok", "message": "LINE reply consumer is running",
-		})
-	})
-
-	log.Printf("Starting server on port %s", config.Port)
-	e.Logger.Fatal(e.Start(":" + config.Port))
+	// Pure consumer: no HTTP server, just block until asked to shut down.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	s := <-sig
+	log.Printf("Received %s, shutting down", s)
 }
