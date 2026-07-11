@@ -59,7 +59,7 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	case "hello", "Hello", "hi", "Hi":
 		replyMessage = "Hello! How can I help you today?"
 	case "help", "Help":
-		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- Any other message will be echoed back"
+		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- Any other message will be echoed back."
 	}
 
 	_, err := h.bot.ReplyMessage(event.ReplyToken, linebot.NewTextMessage(replyMessage)).Do()
