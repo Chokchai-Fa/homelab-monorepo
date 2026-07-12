@@ -98,7 +98,9 @@ func (h *LineHandler) markAsRead(body []byte, index int) error {
 func extractMarkAsReadToken(body []byte, index int) (string, error) {
 	var payload struct {
 		Events []struct {
-			MarkAsReadToken string `json:"markAsReadToken"`
+			Message struct {
+				MarkAsReadToken string `json:"markAsReadToken"`
+			} `json:"message"`
 		} `json:"events"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -107,7 +109,7 @@ func extractMarkAsReadToken(body []byte, index int) (string, error) {
 	if index < 0 || index >= len(payload.Events) {
 		return "", nil
 	}
-	return payload.Events[index].MarkAsReadToken, nil
+	return payload.Events[index].Message.MarkAsReadToken, nil
 }
 
 func (h *LineHandler) handleEvent(event *linebot.Event) error {
