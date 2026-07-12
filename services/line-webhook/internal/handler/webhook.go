@@ -36,6 +36,7 @@ func (h *LineHandler) Webhook(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "Failed to parse request")
 	}
 	log.Info().Int("events", len(events)).Msg("webhook: request parsed")
+	log.Debug().RawJSON("payload", body).Msg("webhook: raw payload")
 
 	for i, event := range events {
 		if err := h.markAsRead(body, i); err != nil {
@@ -55,9 +56,15 @@ func (h *LineHandler) markAsRead(body []byte, index int) error {
 	}
 
 	token, err := extractMarkAsReadToken(body, index)
-	if err != nil || token == "" {
+	if err != nil {
+		log.Error().Int("index", index).Err(err).Msg("markAsRead: failed to extract markAsReadToken")
 		return err
 	}
+	if token == "" {
+		log.Warn().Int("index", index).Msg("markAsRead: markAsReadToken is empty - LINE may not be sending it; check LINE OA chat feature settings")
+		return nil
+	}
+	log.Debug().Int("index", index).Str("token_prefix", token[:min(len(token), 8)]+"...").Msg("markAsRead: extracted token")
 
 	payload := map[string]string{"markAsReadToken": token}
 	data, err := json.Marshal(payload)
@@ -74,13 +81,17 @@ func (h *LineHandler) markAsRead(body []byte, index int) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Error().Int("index", index).Err(err).Msg("markAsRead: HTTP request failed")
 		return err
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Error().Int("index", index).Int("status", resp.StatusCode).Str("body", string(respBody)).Msg("markAsRead: LINE API returned error")
 		return fmt.Errorf("mark as read failed with status %d", resp.StatusCode)
 	}
+	log.Debug().Int("index", index).Int("status", resp.StatusCode).Msg("markAsRead: success")
 	return nil
 }
 

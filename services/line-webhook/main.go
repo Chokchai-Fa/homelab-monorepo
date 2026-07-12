@@ -8,6 +8,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"line-webhook/internal/handler"
@@ -65,6 +66,13 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Info().Err(err).Msg("startup: .env not loaded")
 	}
+
+	level, err := zerolog.ParseLevel(getEnv("LOG_LEVEL", "debug"))
+	if err != nil {
+		level = zerolog.DebugLevel
+	}
+	zerolog.SetGlobalLevel(level)
+	log.Info().Str("level", level.String()).Msg("startup: log level set")
 
 	config := loadConfig()
 
