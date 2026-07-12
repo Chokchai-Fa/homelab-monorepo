@@ -37,8 +37,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -ldflags "-s -w" -o /out/app ${MAIN_PATH}
 
 # Runtime image: small Alpine with CA certs for the target platform.
+# CA certs are copied from the builder instead of running apk — this avoids
+# any RUN on the target platform so QEMU is not needed at all.
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /
 COPY --from=builder /out/app /app
