@@ -113,6 +113,37 @@ func TestDebouncerSecondImageFlushesFirst(t *testing.T) {
 	}
 }
 
+func TestDebouncerBypassesWindowForResetCommand(t *testing.T) {
+	rec := &flushRecorder{}
+	// window long enough that a normal message would never flush in time.
+	d := NewDebouncer(10*time.Second, time.Minute, rec.flush)
+
+	d.Add(RequestEvent{UserID: "u1", Text: "/reset"})
+
+	waitFor(t, func() bool { return len(rec.get()) == 1 })
+	if got := rec.get()[0]; got.Text != "/reset" {
+		t.Errorf("dispatched event = %+v", got)
+	}
+}
+
+func TestDebouncerResetFlushesPriorBurstFirst(t *testing.T) {
+	rec := &flushRecorder{}
+	d := NewDebouncer(10*time.Second, time.Minute, rec.flush)
+
+	d.Add(RequestEvent{UserID: "u1", Text: "hey"})
+	d.Add(RequestEvent{UserID: "u1", Text: "quick question"})
+	d.Add(RequestEvent{UserID: "u1", Text: "/reset"})
+
+	waitFor(t, func() bool { return len(rec.get()) == 2 })
+	got := rec.get()
+	if got[0].Text != "hey\nquick question" {
+		t.Errorf("first flush = %q, want prior burst merged", got[0].Text)
+	}
+	if got[1].Text != "/reset" {
+		t.Errorf("second flush = %q, want /reset", got[1].Text)
+	}
+}
+
 func TestDebouncerFlushAllWaits(t *testing.T) {
 	rec := &flushRecorder{}
 	d := NewDebouncer(10*time.Second, time.Minute, rec.flush) // never fires on its own

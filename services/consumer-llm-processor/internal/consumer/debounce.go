@@ -44,8 +44,41 @@ func NewDebouncer(window, maxWait time.Duration, flush func(RequestEvent)) *Debo
 	}
 }
 
-// Add buffers one event and (re)arms the user's flush timer.
+// Add buffers one event and (re)arms the user's flush timer. Control
+// commands (e.g. "/reset") skip the buffer entirely: they run immediately,
+// after first answering whatever chat fragments were already waiting for
+// that user - in order, on the same goroutine, so e.g. a reset can't race
+// ahead of storing the prior burst's answer and then have it linger in the
+// "cleared" history - since a command shouldn't sit out the debounce window
+// like an ordinary message.
 func (d *Debouncer) Add(event RequestEvent) {
+	if isResetCommand(event.Text) {
+		d.mu.Lock()
+		p, hadBurst := d.pending[event.UserID]
+		if hadBurst {
+			delete(d.pending, event.UserID)
+			if p.timer != nil {
+				p.timer.Stop()
+			}
+		}
+		d.mu.Unlock()
+
+		log.Info().Str("user_id", event.UserID).Msg("debounce: command - bypassing debounce window")
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			if hadBurst {
+				merged := mergeEvent(p)
+				if len(p.texts) > 1 {
+					log.Info().Str("user_id", event.UserID).Int("messages", len(p.texts)).Msg("debounce: merged burst into one request")
+				}
+				d.flush(merged)
+			}
+			d.flush(event)
+		}()
+		return
+	}
+
 	d.mu.Lock()
 
 	p, ok := d.pending[event.UserID]
@@ -112,16 +145,30 @@ func (d *Debouncer) flushLocked(userID string) {
 		p.timer.Stop()
 	}
 
+	merged := mergeEvent(p)
+	if len(p.texts) > 1 {
+		log.Info().Str("user_id", userID).Int("messages", len(p.texts)).Msg("debounce: merged burst into one request")
+	}
+	d.dispatch(merged)
+}
+
+// mergeEvent folds a buffered burst into the single event that gets sent
+// for it: all fragment texts joined in order, latest reply token/image.
+func mergeEvent(p *pendingRequest) RequestEvent {
 	merged := p.latest
 	merged.Text = strings.Join(p.texts, "\n")
 	merged.ImageKey = p.imageKey
 	merged.ImageMime = p.imageMime
-	if len(p.texts) > 1 {
-		log.Info().Str("user_id", userID).Int("messages", len(p.texts)).Msg("debounce: merged burst into one request")
-	}
+	return merged
+}
+
+// dispatch runs the flush callback on its own goroutine, tracked so
+// FlushAll can wait for it, so a slow LLM call never blocks buffering for
+// other users.
+func (d *Debouncer) dispatch(event RequestEvent) {
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		d.flush(merged)
+		d.flush(event)
 	}()
 }

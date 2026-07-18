@@ -129,16 +129,29 @@ func (c *Consumer) Handle(event RequestEvent) {
 // normal case: LINE image messages carry no caption).
 const defaultImagePrompt = "Describe what's in this image."
 
+// isResetCommand reports whether text is the reset command, in any of its
+// accepted spellings. Shared with the debouncer, which must recognize and
+// bypass it too - a control command shouldn't sit in the chat buffer
+// waiting out the debounce window like an ordinary message.
+func isResetCommand(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/reset", "ล้าง", "เริ่มใหม่":
+		return true
+	default:
+		return false
+	}
+}
+
 // respond computes the reply text for the event.
 func (c *Consumer) respond(ctx context.Context, event RequestEvent) string {
 	query := strings.TrimSpace(event.Text)
 
 	if event.ImageKey == "" {
-		switch strings.ToLower(query) {
-		case "":
+		switch {
+		case query == "":
 			log.Info().Str("user_id", event.UserID).Msg("respond: empty query - sending usage hint")
 			return "Ask me anything after /ai, e.g. \"/ai แนะนำที่เที่ยวในเชียงใหม่\" or \"/ai explain kubernetes\".\nSend \"/ai /reset\" to start a new conversation."
-		case "/reset", "ล้าง", "เริ่มใหม่":
+		case isResetCommand(query):
 			if err := c.store.Clear(ctx, event.UserID); err != nil {
 				log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: failed to clear history")
 				return "Sorry, I couldn't reset the conversation. Please try again."
