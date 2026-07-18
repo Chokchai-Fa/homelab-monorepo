@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
@@ -118,6 +119,8 @@ func (h *LineHandler) handleEvent(event *linebot.Event) error {
 		switch message := event.Message.(type) {
 		case *linebot.TextMessage:
 			return h.handleTextMessage(event, message)
+		case *linebot.ImageMessage:
+			return h.handleImageMessage(event, message)
 		}
 	case linebot.EventTypeFollow:
 		return h.handleFollowEvent(event)
@@ -154,7 +157,7 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	case "hello", "Hello", "hi", "Hi":
 		replyMessage = "Hello! How can I help you today?"
 	case "help", "Help":
-		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- " + h.cfg.AIPrefix + " <question>: Start an AI session and ask (any language). While the session is active, every message goes to the AI.\n- " + h.cfg.AIPrefix + "-end: End the AI session (it also ends after 10 minutes of silence)\n- " + h.cfg.AIPrefix + " reset: Clear your AI conversation history\n- Any other message will be echoed back."
+		replyMessage = "Available commands:\n- hello: Greet the bot\n- help: Show this help message\n- " + h.cfg.AIPrefix + " <question>: Start an AI session and ask (any language). While the session is active, every message goes to the AI.\n- " + h.cfg.AIPrefix + "-end: End the AI session (it also ends after 10 minutes of silence)\n- " + h.cfg.AIPrefix + " /reset: Clear your AI conversation history\n- Any other message will be echoed back."
 	}
 
 	return h.reply(event, replyMessage)
@@ -200,6 +203,10 @@ func (h *LineHandler) handleAIEnd(event *linebot.Event) error {
 // publishAIRequest sends the question to NATS for consumer-llm-processor,
 // which answers through consumer-reply-line-user using the reply token.
 func (h *LineHandler) publishAIRequest(event *linebot.Event, query string) error {
+	return h.publishAIRequestWithImage(event, query, "", "")
+}
+
+func (h *LineHandler) publishAIRequestWithImage(event *linebot.Event, query, imageKey, imageMime string) error {
 	if h.pub == nil {
 		log.Error().Str("user_id", event.Source.UserID).Msg("webhook: AI request dropped - NATS publisher not connected")
 		return nil
@@ -209,6 +216,8 @@ func (h *LineHandler) publishAIRequest(event *linebot.Event, query string) error
 		UserID:     event.Source.UserID,
 		ReplyToken: event.ReplyToken,
 		Text:       query,
+		ImageKey:   imageKey,
+		ImageMime:  imageMime,
 		Timestamp:  event.Timestamp.UnixMilli(),
 	})
 	if err == nil {
@@ -219,6 +228,62 @@ func (h *LineHandler) publishAIRequest(event *linebot.Event, query string) error
 
 	unavailable := "Sorry, the AI assistant is unavailable right now. Please try again later.\nขออภัย ตอนนี้ผู้ช่วย AI ไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง"
 	return h.reply(event, unavailable)
+}
+
+// maxImageBytes falls back to 10MB (comfortably under LINE's own image
+// upload limit and the free vision providers' per-request caps) if unset.
+const defaultMaxImageBytes = 10 << 20
+
+// handleImageMessage forwards an image the user sent to the AI, but only
+// while an AI session is active: LINE image messages carry no caption text,
+// so there's no other signal that the user wants the AI to look at it.
+func (h *LineHandler) handleImageMessage(event *linebot.Event, message *linebot.ImageMessage) error {
+	userID := event.Source.UserID
+	log.Info().Str("user_id", userID).Str("message_id", message.ID).Msg("webhook: image message received")
+
+	if h.sessions == nil || userID == "" || !h.sessions.Active(context.Background(), userID) {
+		return h.reply(event, "Start an AI session first with "+h.cfg.AIPrefix+", then send your image.\nเริ่มคุยกับ AI ด้วย "+h.cfg.AIPrefix+" ก่อน แล้วค่อยส่งรูปมาน้า~")
+	}
+	if h.bot == nil || h.images == nil {
+		log.Error().Str("user_id", userID).Msg("webhook: image dropped - LINE client or image store not configured")
+		return h.reply(event, "Sorry, I can't process images right now. Please try again later.")
+	}
+
+	content, err := h.bot.GetMessageContent(message.ID).Do()
+	if err != nil {
+		log.Error().Str("user_id", userID).Str("message_id", message.ID).Err(err).Msg("webhook: failed to download image content")
+		return h.reply(event, "Sorry, I couldn't download that image. Please try again.")
+	}
+	defer content.Content.Close()
+
+	maxBytes := h.cfg.MaxImageBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxImageBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(content.Content, maxBytes+1))
+	if err != nil {
+		log.Error().Str("user_id", userID).Str("message_id", message.ID).Err(err).Msg("webhook: failed to read image content")
+		return h.reply(event, "Sorry, I couldn't read that image. Please try again.")
+	}
+	if int64(len(data)) > maxBytes {
+		log.Warn().Str("user_id", userID).Str("message_id", message.ID).Int("bytes", len(data)).Msg("webhook: image exceeds size limit - dropping")
+		return h.reply(event, "That image is too large for me to look at. Please send a smaller one.")
+	}
+
+	ttl := h.cfg.ImageTTL
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	if err := h.images.Put(context.Background(), message.ID, data, ttl); err != nil {
+		log.Error().Str("user_id", userID).Str("message_id", message.ID).Err(err).Msg("webhook: failed to stash image - dropping")
+		return h.reply(event, "Sorry, I couldn't process that image. Please try again.")
+	}
+
+	mime := content.ContentType
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	return h.publishAIRequestWithImage(event, "", message.ID, mime)
 }
 
 func (h *LineHandler) handleFollowEvent(event *linebot.Event) error {

@@ -28,11 +28,16 @@ const (
 type Router struct {
 	classifier Provider
 	chains     map[Tier][]Provider
+	vision     []Provider
 }
 
 // NewRouter builds a router. classifier may be nil, in which case every
-// question uses the general chain. Empty chains fall back to general.
-func NewRouter(classifier Provider, simple, general, technical []Provider) *Router {
+// question uses the general chain. Empty simple/technical chains fall back
+// to general. vision is the chain used whenever a request carries an image
+// - difficulty tiering doesn't apply there since free-tier vision-capable
+// models are scarce and picking one able to see the image matters more than
+// picking one suited to the question's difficulty.
+func NewRouter(classifier Provider, simple, general, technical, vision []Provider) *Router {
 	chains := map[Tier][]Provider{TierGeneral: general}
 	chains[TierSimple] = simple
 	if len(simple) == 0 {
@@ -42,25 +47,33 @@ func NewRouter(classifier Provider, simple, general, technical []Provider) *Rout
 	if len(technical) == 0 {
 		chains[TierTechnical] = general
 	}
-	return &Router{classifier: classifier, chains: chains}
+	return &Router{classifier: classifier, chains: chains, vision: vision}
 }
 
 func (r *Router) Name() string { return "router" }
 
-// Reply classifies the question, then tries each provider in the tier's
-// chain until one answers.
-func (r *Router) Reply(ctx context.Context, history []store.Message, userMessage string) (string, error) {
-	tier := r.classify(ctx, userMessage)
-	for _, p := range r.chains[tier] {
-		answer, err := p.Reply(ctx, history, userMessage)
+// Reply routes an image straight to the vision chain; otherwise it
+// classifies the question and tries each provider in the tier's chain until
+// one answers.
+func (r *Router) Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error) {
+	label := "vision"
+	chain := r.vision
+	if image == nil {
+		tier := r.classify(ctx, userMessage)
+		label = string(tier)
+		chain = r.chains[tier]
+	}
+
+	for _, p := range chain {
+		answer, err := p.Reply(ctx, history, userMessage, image)
 		if err != nil {
-			log.Warn().Str("tier", string(tier)).Str("provider", p.Name()).Err(err).Msg("route: provider failed - trying next")
+			log.Warn().Str("tier", label).Str("provider", p.Name()).Err(err).Msg("route: provider failed - trying next")
 			continue
 		}
-		log.Info().Str("tier", string(tier)).Str("provider", p.Name()).Msg("route: answered")
+		log.Info().Str("tier", label).Str("provider", p.Name()).Msg("route: answered")
 		return answer, nil
 	}
-	return "", fmt.Errorf("all providers failed for tier %q", tier)
+	return "", fmt.Errorf("all providers failed for tier %q", label)
 }
 
 // classify asks the small classifier model for a one-word difficulty tier,
@@ -73,7 +86,7 @@ func (r *Router) classify(ctx context.Context, userMessage string) Tier {
 	cctx, cancel := context.WithTimeout(ctx, classifyTimeout)
 	defer cancel()
 
-	verdict, err := r.classifier.Reply(cctx, nil, userMessage)
+	verdict, err := r.classifier.Reply(cctx, nil, userMessage, nil)
 	if err != nil {
 		log.Warn().Str("classifier", r.classifier.Name()).Err(err).Msg("route: classify failed - defaulting to general")
 		return TierGeneral

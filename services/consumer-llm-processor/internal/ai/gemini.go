@@ -56,14 +56,23 @@ func (g *Gemini) Derive(name, system string, deepThinking bool) *Gemini {
 
 func (g *Gemini) Name() string { return g.name }
 
-// Reply sends the conversation history plus the new user message and returns
+// Reply sends the conversation history plus the new user message (and an
+// optional attached image, which Gemini models handle natively) and returns
 // the model's answer.
-func (g *Gemini) Reply(ctx context.Context, history []store.Message, userMessage string) (string, error) {
+func (g *Gemini) Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error) {
 	contents := make([]*genai.Content, 0, len(history)+1)
 	for _, m := range history {
 		contents = append(contents, genai.NewContentFromText(m.Content, genai.Role(m.Role)))
 	}
-	contents = append(contents, genai.NewContentFromText(userMessage, genai.RoleUser))
+	if image != nil {
+		parts := []*genai.Part{genai.NewPartFromBytes(image.Data, image.MimeType)}
+		if userMessage != "" {
+			parts = append(parts, genai.NewPartFromText(userMessage))
+		}
+		contents = append(contents, genai.NewContentFromParts(parts, genai.RoleUser))
+	} else {
+		contents = append(contents, genai.NewContentFromText(userMessage, genai.RoleUser))
+	}
 
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, &genai.GenerateContentConfig{
 		SystemInstruction: genai.NewContentFromText(g.system, genai.RoleUser),

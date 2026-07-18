@@ -6,12 +6,19 @@ import (
 	"consumer-llm-processor/internal/store"
 )
 
+// Image is a picture attached to the current user message. Only the current
+// message can carry one - history is stored as text, never image bytes.
+type Image struct {
+	Data     []byte
+	MimeType string
+}
+
 // Provider generates a chat reply from conversation history plus the new
-// user message. Gemini, OpenAI-compatible clients and the Router all
-// implement it.
+// user message and an optional attached image. Gemini, OpenAI-compatible
+// clients and the Router all implement it.
 type Provider interface {
 	Name() string
-	Reply(ctx context.Context, history []store.Message, userMessage string) (string, error)
+	Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error)
 }
 
 // PersonaInstruction is the shared system prompt so Mio sounds the same no

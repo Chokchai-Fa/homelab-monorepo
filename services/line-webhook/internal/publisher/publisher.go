@@ -15,11 +15,15 @@ const (
 )
 
 // AIRequestEvent is consumed by consumer-llm-processor. Text has the AI
-// prefix (e.g. "/ai") already stripped.
+// prefix (e.g. "/ai") already stripped. ImageKey, when set, is the Redis key
+// (see internal/imagecache) holding an image the user attached; Text may be
+// empty in that case.
 type AIRequestEvent struct {
 	UserID     string `json:"user_id"`
 	ReplyToken string `json:"reply_token"`
 	Text       string `json:"text"`
+	ImageKey   string `json:"image_key,omitempty"`
+	ImageMime  string `json:"image_mime,omitempty"`
 	Timestamp  int64  `json:"timestamp"`
 }
 

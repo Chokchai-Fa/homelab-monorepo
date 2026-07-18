@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"line-webhook/internal/handler"
+	"line-webhook/internal/imagecache"
 	"line-webhook/internal/publisher"
 	"line-webhook/internal/router"
 	"line-webhook/internal/session"
@@ -28,6 +29,8 @@ type Config struct {
 	RedisUsername string
 	RedisPassword string
 	SessionTTL    time.Duration
+	ImageTTL      time.Duration
+	MaxImageBytes int64
 	Port          string
 }
 
@@ -38,6 +41,14 @@ func loadConfig() *Config {
 			ttl = d
 		} else {
 			log.Error().Str("value", v).Err(err).Msg("config: invalid AI_SESSION_TTL - using default 10m")
+		}
+	}
+	imageTTL := 10 * time.Minute
+	if v := os.Getenv("IMAGE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			imageTTL = d
+		} else {
+			log.Error().Str("value", v).Err(err).Msg("config: invalid IMAGE_TTL - using default 10m")
 		}
 	}
 	return &Config{
@@ -51,6 +62,8 @@ func loadConfig() *Config {
 		RedisUsername: getEnv("REDIS_USERNAME", ""),
 		RedisPassword: getEnv("REDIS_PASSWORD", ""),
 		SessionTTL:    ttl,
+		ImageTTL:      imageTTL,
+		MaxImageBytes: 10 << 20,
 		Port:          getEnv("PORT", "8080"),
 	}
 }
@@ -97,9 +110,11 @@ func main() {
 		log.Error().Msg("startup: NATS_URL not set - incoming messages will be dropped")
 	}
 
-	// AI session store in Redis (sliding TTL). Non-fatal on failure: without
-	// it only the explicit prefix routes messages to the AI.
+	// AI session store and image handoff cache share one Redis connection.
+	// Non-fatal on failure: without it, only the explicit prefix routes
+	// messages to the AI, and images are declined with a hint.
 	var sessions handler.SessionStore
+	var images handler.ImageStore
 	if config.RedisAddr != "" {
 		rdb := redis.NewClient(&redis.Options{
 			Addr:     config.RedisAddr,
@@ -107,13 +122,14 @@ func main() {
 			Password: config.RedisPassword,
 		})
 		if err := rdb.Ping(context.Background()).Err(); err != nil {
-			log.Error().Str("addr", config.RedisAddr).Err(err).Msg("startup: redis unreachable - AI session mode degraded to prefix-only")
+			log.Error().Str("addr", config.RedisAddr).Err(err).Msg("startup: redis unreachable - AI session mode degraded to prefix-only, images disabled")
 		} else {
 			log.Info().Str("addr", config.RedisAddr).Dur("ttl", config.SessionTTL).Msg("startup: AI session store ready")
 		}
 		sessions = session.New(rdb, config.SessionTTL)
+		images = imagecache.New(rdb)
 	} else {
-		log.Info().Msg("startup: REDIS_ADDR not set - AI session mode disabled (prefix-only)")
+		log.Info().Msg("startup: REDIS_ADDR not set - AI session mode disabled (prefix-only), images disabled")
 	}
 
 	var bot *linebot.Client
@@ -130,9 +146,16 @@ func main() {
 	// Initialize Echo via router package and start server
 	e := router.NewRouter(router.RouterOptions{
 		Echo:      nil, // router will create a new Echo instance if nil
-		Config:    &handler.Config{ChannelSecret: config.ChannelSecret, ChannelToken: config.ChannelToken, AIPrefix: config.AIPrefix},
+		Config: &handler.Config{
+			ChannelSecret: config.ChannelSecret,
+			ChannelToken:  config.ChannelToken,
+			AIPrefix:      config.AIPrefix,
+			ImageTTL:      config.ImageTTL,
+			MaxImageBytes: config.MaxImageBytes,
+		},
 		Publisher: pub,
 		Sessions:  sessions,
+		Images:    images,
 		Bot:       bot,
 	})
 

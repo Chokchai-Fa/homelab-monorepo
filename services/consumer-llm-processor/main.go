@@ -14,6 +14,7 @@ import (
 
 	"consumer-llm-processor/internal/ai"
 	"consumer-llm-processor/internal/consumer"
+	"consumer-llm-processor/internal/imagecache"
 	"consumer-llm-processor/internal/store"
 )
 
@@ -34,10 +35,15 @@ type Config struct {
 	GroqClassifierModel string
 	OpenRouterAPIKey    string
 	OpenRouterModel     string
+	OpenRouterVision    string
 	DatabaseURL         string
 	RedisAddr           string
 	RedisUsername       string
 	RedisPassword       string
+	// DebounceWindow buffers a user's rapid chat messages until they've been
+	// quiet this long, answering the burst as one request; 0 disables.
+	DebounceWindow  time.Duration
+	DebounceMaxWait time.Duration
 }
 
 func loadConfig() *Config {
@@ -51,33 +57,59 @@ func loadConfig() *Config {
 		GroqModel:           getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
 		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "llama-3.1-8b-instant"),
 		OpenRouterAPIKey:    getEnv("OPENROUTER_API_KEY", ""),
-		OpenRouterModel:     getEnv("OPENROUTER_MODEL", "deepseek/deepseek-r1:free"),
+		// OpenRouter's :free lineup rotates (deepseek-r1:free died 2026-07);
+		// verify against https://openrouter.ai/api/v1/models when it 404s.
+		OpenRouterModel:     getEnv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free"),
+		OpenRouterVision:    getEnv("OPENROUTER_VISION_MODEL", "google/gemma-4-31b-it:free"),
 		DatabaseURL:         getEnv("DATABASE_URL", ""),
 		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisUsername:       getEnv("REDIS_USERNAME", ""),
 		RedisPassword:       getEnv("REDIS_PASSWORD", ""),
+		// 3s: long enough to catch quick-fire message fragments (typically
+		// <3s apart), short enough not to drag on single-message questions,
+		// which pay this delay on every reply. Tune from the
+		// "debounce: merged burst" logs: if merges are rare, go lower.
+		DebounceWindow:      getEnvDuration("DEBOUNCE_WINDOW", 3*time.Second),
+		DebounceMaxWait:     getEnvDuration("DEBOUNCE_MAX_WAIT", 15*time.Second),
 	}
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Error().Str("key", key).Str("value", v).Err(err).Msg("config: invalid duration - using default")
+		return defaultValue
+	}
+	return d
 }
 
 // buildRouter assembles the difficulty router from whichever providers have
 // API keys configured. Gemini alone still works: every tier then falls back
-// to it.
+// to it, and it's also the sole vision provider (Groq's free vision model
+// was deprecated in June 2026; OpenRouter's free vision model joins only if
+// OPENROUTER_API_KEY is set).
 func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
-	var groq, openrouter ai.Provider
+	var groq, openrouter, openrouterVision ai.Provider
 	if config.GroqAPIKey != "" {
-		groq = ai.NewOpenAI("groq", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqModel, ai.PersonaInstruction)
+		groq = ai.NewOpenAI("groq", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqModel, ai.PersonaInstruction, false)
 		log.Info().Str("model", config.GroqModel).Msg("startup: groq provider enabled")
 	}
 	if config.OpenRouterAPIKey != "" {
-		openrouter = ai.NewOpenAI("openrouter", "https://openrouter.ai/api/v1", config.OpenRouterAPIKey, config.OpenRouterModel, ai.PersonaInstruction)
+		openrouter = ai.NewOpenAI("openrouter", "https://openrouter.ai/api/v1", config.OpenRouterAPIKey, config.OpenRouterModel, ai.PersonaInstruction, false)
 		log.Info().Str("model", config.OpenRouterModel).Msg("startup: openrouter provider enabled")
+		openrouterVision = ai.NewOpenAI("openrouter-vision", "https://openrouter.ai/api/v1", config.OpenRouterAPIKey, config.OpenRouterVision, ai.PersonaInstruction, true)
+		log.Info().Str("model", config.OpenRouterVision).Msg("startup: openrouter vision provider enabled")
 	}
 
 	// Classifier: a tiny Groq model when available (fast, generous free
 	// quota), otherwise Gemini classifies its own traffic.
 	var classifier ai.Provider
 	if config.GroqAPIKey != "" {
-		classifier = ai.NewOpenAI("groq-classifier", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqClassifierModel, ai.ClassifierInstruction)
+		classifier = ai.NewOpenAI("groq-classifier", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqClassifierModel, ai.ClassifierInstruction, false)
 	} else {
 		classifier = gemini.Derive("gemini-classifier", ai.ClassifierInstruction, false)
 	}
@@ -101,6 +133,7 @@ func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
 		chain(gemini, groq, openrouter),             // simple
 		chain(groq, gemini, openrouter),             // general
 		chain(openrouter, groq, geminiDeep, gemini), // technical
+		chain(gemini, openrouterVision),             // vision
 	)
 }
 
@@ -144,6 +177,9 @@ func main() {
 	conversations := store.NewCached(pg, rdb, historyLimit, cacheTTL)
 	defer conversations.Close()
 
+	// Same Redis instance line-webhook stashes image bytes in.
+	images := imagecache.New(rdb)
+
 	gemini, err := ai.New(ctx, config.GeminiAPIKey, config.GeminiModel)
 	if err != nil {
 		log.Fatal().Err(err).Msg("startup: failed to init gemini client")
@@ -164,7 +200,10 @@ func main() {
 	defer nc.Drain()
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
-	c := consumer.New(conversations, router, nc)
+	c := consumer.New(conversations, router, images, nc, config.DebounceWindow, config.DebounceMaxWait)
+	// Answer buffered bursts before draining NATS on shutdown (defers run
+	// LIFO, so Flush precedes Drain).
+	defer c.Flush()
 	sub, err := c.Subscribe()
 	if err != nil {
 		log.Fatal().Str("subject", consumer.RequestSubject).Err(err).Msg("startup: failed to subscribe")

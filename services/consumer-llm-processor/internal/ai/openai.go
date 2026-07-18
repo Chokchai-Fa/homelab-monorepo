@@ -3,6 +3,7 @@ package ai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,27 +21,42 @@ type OpenAI struct {
 	apiKey  string
 	model   string
 	system  string
+	vision  bool
 	client  *http.Client
 }
 
 // NewOpenAI creates a client for an OpenAI-compatible provider. baseURL is
 // the prefix before /chat/completions, e.g. https://api.groq.com/openai/v1.
-func NewOpenAI(name, baseURL, apiKey, model, system string) *OpenAI {
+// vision must only be true if model actually accepts image inputs.
+func NewOpenAI(name, baseURL, apiKey, model, system string, vision bool) *OpenAI {
 	return &OpenAI{
 		name:    name,
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		model:   model,
 		system:  system,
+		vision:  vision,
 		client:  &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
 func (o *OpenAI) Name() string { return o.name + "/" + o.model }
 
+// chatMessage's Content is either a plain string or, for a multimodal
+// request, a []contentPart - hence the any and the custom marshaling below.
 type chatMessage struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+type contentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"`
 }
 
 type chatRequest struct {
@@ -56,9 +72,14 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-// Reply sends the conversation history plus the new user message and returns
-// the model's answer.
-func (o *OpenAI) Reply(ctx context.Context, history []store.Message, userMessage string) (string, error) {
+// Reply sends the conversation history plus the new user message (and an
+// optional attached image, sent as a base64 data URL per the OpenAI image
+// content-part convention) and returns the model's answer.
+func (o *OpenAI) Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error) {
+	if image != nil && !o.vision {
+		return "", fmt.Errorf("%s does not support image input", o.Name())
+	}
+
 	messages := make([]chatMessage, 0, len(history)+2)
 	messages = append(messages, chatMessage{Role: "system", Content: o.system})
 	for _, m := range history {
@@ -68,7 +89,19 @@ func (o *OpenAI) Reply(ctx context.Context, history []store.Message, userMessage
 		}
 		messages = append(messages, chatMessage{Role: role, Content: m.Content})
 	}
-	messages = append(messages, chatMessage{Role: "user", Content: userMessage})
+
+	if image != nil {
+		parts := []contentPart{{
+			Type:     "image_url",
+			ImageURL: &imageURL{URL: fmt.Sprintf("data:%s;base64,%s", image.MimeType, base64.StdEncoding.EncodeToString(image.Data))},
+		}}
+		if userMessage != "" {
+			parts = append(parts, contentPart{Type: "text", Text: userMessage})
+		}
+		messages = append(messages, chatMessage{Role: "user", Content: parts})
+	} else {
+		messages = append(messages, chatMessage{Role: "user", Content: userMessage})
+	}
 
 	body, err := json.Marshal(chatRequest{Model: o.model, Messages: messages})
 	if err != nil {
