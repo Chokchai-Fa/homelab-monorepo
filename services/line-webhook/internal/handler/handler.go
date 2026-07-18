@@ -51,6 +51,13 @@ type ImageStore interface {
 	Put(ctx context.Context, messageID string, data []byte, ttl time.Duration) error
 }
 
+// GeneratedImageStore reads images consumer-llm-processor generated, for
+// serving them publicly at /images/<id> where LINE fetches them; nil
+// disables the endpoint.
+type GeneratedImageStore interface {
+	GetGenerated(ctx context.Context, id string) ([]byte, error)
+}
+
 // Handler defines the public behavior for a webhook handler.
 // It is kept small so it can be easily mocked in tests.
 type Handler interface {

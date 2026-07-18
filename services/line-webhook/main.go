@@ -115,6 +115,7 @@ func main() {
 	// messages to the AI, and images are declined with a hint.
 	var sessions handler.SessionStore
 	var images handler.ImageStore
+	var genImages handler.GeneratedImageStore
 	if config.RedisAddr != "" {
 		rdb := redis.NewClient(&redis.Options{
 			Addr:     config.RedisAddr,
@@ -127,7 +128,9 @@ func main() {
 			log.Info().Str("addr", config.RedisAddr).Dur("ttl", config.SessionTTL).Msg("startup: AI session store ready")
 		}
 		sessions = session.New(rdb, config.SessionTTL)
-		images = imagecache.New(rdb)
+		store := imagecache.New(rdb)
+		images = store
+		genImages = store
 	} else {
 		log.Info().Msg("startup: REDIS_ADDR not set - AI session mode disabled (prefix-only), images disabled")
 	}
@@ -156,6 +159,7 @@ func main() {
 		Publisher: pub,
 		Sessions:  sessions,
 		Images:    images,
+		GenImages: genImages,
 		Bot:       bot,
 	})
 

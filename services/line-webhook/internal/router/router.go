@@ -22,6 +22,7 @@ type RouterOptions struct {
 	Publisher handler.EventPublisher
 	Sessions  handler.SessionStore
 	Images    handler.ImageStore
+	GenImages handler.GeneratedImageStore
 	Bot       *linebot.Client
 }
 
@@ -47,6 +48,21 @@ func NewRouter(opts RouterOptions) *echo.Echo {
 	})
 
 	e.POST("/webhook", h.Webhook, ValidateSignatureMiddleware(opts.Config))
+
+	// Generated images (from consumer-llm-processor via Redis), fetched by
+	// LINE's servers when the reply carries an image message. Unauthenticated
+	// by design: the unguessable random ID is the access control, and the
+	// entry expires with its Redis TTL.
+	if opts.GenImages != nil {
+		e.GET("/images/:id", func(c echo.Context) error {
+			data, err := opts.GenImages.GetGenerated(c.Request().Context(), c.Param("id"))
+			if err != nil {
+				return echo.NewHTTPError(http.StatusNotFound, "image not found or expired")
+			}
+			c.Response().Header().Set("Cache-Control", "public, max-age=3600")
+			return c.Blob(http.StatusOK, "image/jpeg", data)
+		})
+	}
 
 	return e
 }

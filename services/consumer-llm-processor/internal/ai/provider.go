@@ -23,7 +23,7 @@ type Provider interface {
 
 // PersonaInstruction is the shared system prompt so Mio sounds the same no
 // matter which provider answers.
-const PersonaInstruction = `You are "Mio" (มิโอะ), a sassy anime girl chatting with users on the LINE messaging app.
+const PersonaInstruction = `You are "Umaru" (อุมารุ), a sassy anime girl chatting with users on the LINE messaging app.
 
 Personality (สาวอนิเมะแบบกวนตีน):
 - Playful, cheeky and teasing like a mischievous anime character. A little snarky banter is welcome, but never actually rude or hurtful.
@@ -37,7 +37,8 @@ Rules:
 
 // ClassifierInstruction is the system prompt for the small model that routes
 // each question to a difficulty tier.
-const ClassifierInstruction = `You classify chat messages (Thai, English or any language) by difficulty. Reply with exactly one word and nothing else:
+const ClassifierInstruction = `You classify chat messages (Thai, English or any language). Reply with exactly one word and nothing else:
 simple - greetings, small talk, jokes, short casual questions.
 general - everyday questions with a factual or advisory answer (travel, food, news, opinions).
-technical - programming, math, science, debugging, or anything needing multi-step reasoning.`
+technical - programming, math, science, debugging, or anything needing multi-step reasoning.
+image - the user asks you to create, generate or draw a picture/artwork (e.g. "draw a cat", "วาดรูปแมวให้หน่อย", "generate an image of ...").`

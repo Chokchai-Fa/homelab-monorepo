@@ -17,19 +17,25 @@ const (
 )
 
 // ReplyEvent is published by line-webhook and consumer-llm-processor.
+// ImageKey names a generated image that line-webhook serves publicly at
+// /images/<key>; it becomes a LINE image message ahead of any text.
 type ReplyEvent struct {
 	UserID     string `json:"user_id"`
 	ReplyToken string `json:"reply_token"`
 	Text       string `json:"text"`
+	ImageKey   string `json:"image_key,omitempty"`
 }
 
 // Consumer subscribes to reply events and delivers them to LINE users.
+// imageBaseURL is the public base (e.g. https://line-webhook.example.com)
+// LINE fetches generated images from; empty disables image replies.
 type Consumer struct {
-	bot *linebot.Client
+	bot          *linebot.Client
+	imageBaseURL string
 }
 
-func New(bot *linebot.Client) *Consumer {
-	return &Consumer{bot: bot}
+func New(bot *linebot.Client, imageBaseURL string) *Consumer {
+	return &Consumer{bot: bot, imageBaseURL: strings.TrimRight(imageBaseURL, "/")}
 }
 
 // Subscribe attaches the consumer to NATS as a queue subscriber so future
@@ -59,16 +65,16 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		log.Error().Str("subject", Subject).Msg("consume: dropping event without user_id or reply_token")
 		return
 	}
-	if event.Text == "" {
+	if event.Text == "" && event.ImageKey == "" {
 		log.Error().Str("user_id", event.UserID).Msg("consume: dropping empty reply")
 		return
 	}
-	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Msg("consume: reply event received")
+	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Bool("image", event.ImageKey != "").Msg("consume: reply event received")
 
-	parts := splitReplyMessages(event.Text)
-	messages := make([]linebot.SendingMessage, len(parts))
-	for i, part := range parts {
-		messages[i] = linebot.NewTextMessage(part)
+	messages := c.buildMessages(event)
+	if len(messages) == 0 {
+		log.Error().Str("user_id", event.UserID).Msg("consume: nothing deliverable in reply")
+		return
 	}
 
 	if event.ReplyToken != "" {
@@ -103,6 +109,25 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		}
 		log.Info().Str("user_id", event.UserID).Int("parts", len(batch)).Msg("deliver: sent via push message")
 	}
+}
+
+// buildMessages turns a reply event into LINE messages: the generated image
+// first (as an image message pointing at line-webhook's public /images
+// endpoint), then the text split into chat-sized parts.
+func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
+	var messages []linebot.SendingMessage
+	if event.ImageKey != "" {
+		if c.imageBaseURL == "" {
+			log.Error().Str("user_id", event.UserID).Msg("build: image reply but IMAGE_BASE_URL not set - sending text only")
+		} else {
+			url := c.imageBaseURL + "/images/" + event.ImageKey
+			messages = append(messages, linebot.NewImageMessage(url, url))
+		}
+	}
+	for _, part := range splitReplyMessages(event.Text) {
+		messages = append(messages, linebot.NewTextMessage(part))
+	}
+	return messages
 }
 
 func splitReplyMessages(text string) []string {

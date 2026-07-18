@@ -29,6 +29,9 @@ type Config struct {
 	NatsPassword string
 	GeminiAPIKey string
 	GeminiModel  string
+	// GeminiImageModel generates pictures for "draw me a ..." requests
+	// (Nano Banana line; free tier ~500 images/day). Empty disables.
+	GeminiImageModel string
 	// Optional free-tier providers; each is enabled by setting its API key.
 	GroqAPIKey          string
 	GroqModel           string
@@ -53,6 +56,7 @@ func loadConfig() *Config {
 		NatsPassword:        getEnv("NATS_PASSWORD", ""),
 		GeminiAPIKey:        getEnv("GEMINI_API_KEY", ""),
 		GeminiModel:         getEnv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		GeminiImageModel:    getEnv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
 		GroqAPIKey:          getEnv("GROQ_API_KEY", ""),
 		GroqModel:           getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
 		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "llama-3.1-8b-instant"),
@@ -115,6 +119,14 @@ func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
 
 	geminiDeep := gemini.Derive("gemini/"+config.GeminiModel+"+think", ai.PersonaInstruction, true)
 
+	// Image generation (Nano Banana) rides the same Gemini key; "draw me a
+	// ..." requests classified as "image" go here instead of a chat chain.
+	var imageGen ai.ImageGenerator
+	if config.GeminiImageModel != "" {
+		imageGen = ai.NewGeminiImage(gemini, config.GeminiImageModel)
+		log.Info().Str("model", config.GeminiImageModel).Msg("startup: image generator enabled")
+	}
+
 	chain := func(providers ...ai.Provider) []ai.Provider {
 		out := make([]ai.Provider, 0, len(providers))
 		for _, p := range providers {
@@ -133,6 +145,7 @@ func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
 		chain(groq, gemini, openrouter),             // general
 		chain(openrouter, groq, geminiDeep, gemini), // technical
 		chain(gemini, openrouterVision),             // vision
+		imageGen,
 	)
 }
 

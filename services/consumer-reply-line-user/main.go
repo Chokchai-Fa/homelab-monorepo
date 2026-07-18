@@ -20,6 +20,10 @@ type Config struct {
 	NatsPassword  string
 	ChannelSecret string
 	ChannelToken  string
+	// ImageBaseURL is line-webhook's public base URL; generated images are
+	// sent to LINE as <ImageBaseURL>/images/<key>. Empty disables image
+	// replies (their text still goes out).
+	ImageBaseURL string
 }
 
 func loadConfig() *Config {
@@ -29,6 +33,7 @@ func loadConfig() *Config {
 		NatsPassword:  getEnv("NATS_PASSWORD", ""),
 		ChannelSecret: getEnv("LINE_CHANNEL_SECRET", ""),
 		ChannelToken:  getEnv("LINE_CHANNEL_ACCESS_TOKEN", ""),
+		ImageBaseURL:  getEnv("IMAGE_BASE_URL", ""),
 	}
 }
 
@@ -67,7 +72,10 @@ func main() {
 	defer nc.Drain()
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
-	c := consumer.New(bot)
+	if config.ImageBaseURL == "" {
+		log.Info().Msg("startup: IMAGE_BASE_URL not set - generated-image replies disabled")
+	}
+	c := consumer.New(bot, config.ImageBaseURL)
 	sub, err := c.Subscribe(nc)
 	if err != nil {
 		log.Fatal().Str("subject", consumer.Subject).Err(err).Msg("startup: failed to subscribe")
