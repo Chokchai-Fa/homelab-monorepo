@@ -48,7 +48,7 @@ OPENROUTER_VISION_MODEL=google/gemma-4-31b-it:free
 # Chat debouncing: answer a burst of rapid messages as one request after the
 # user has been quiet for DEBOUNCE_WINDOW (0 answers each message alone);
 # DEBOUNCE_MAX_WAIT caps buffering for someone who never stops typing.
-DEBOUNCE_WINDOW=3s
+DEBOUNCE_WINDOW=5s
 DEBOUNCE_MAX_WAIT=15s
 ```
 

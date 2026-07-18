@@ -65,11 +65,10 @@ func loadConfig() *Config {
 		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
 		RedisUsername:       getEnv("REDIS_USERNAME", ""),
 		RedisPassword:       getEnv("REDIS_PASSWORD", ""),
-		// 3s: long enough to catch quick-fire message fragments (typically
-		// <3s apart), short enough not to drag on single-message questions,
-		// which pay this delay on every reply. Tune from the
-		// "debounce: merged burst" logs: if merges are rare, go lower.
-		DebounceWindow:      getEnvDuration("DEBOUNCE_WINDOW", 3*time.Second),
+		// Every reply pays this delay, but bursts split when the gap between
+		// fragments exceeds it. Tune from the "debounce: merged burst" logs:
+		// rare merges mean it can go lower.
+		DebounceWindow:      getEnvDuration("DEBOUNCE_WINDOW", 5*time.Second),
 		DebounceMaxWait:     getEnvDuration("DEBOUNCE_MAX_WAIT", 15*time.Second),
 	}
 }
