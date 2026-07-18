@@ -45,8 +45,15 @@ func (c *Consumer) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
 	})
 }
 
+// maxMessagesPerCall is LINE's limit on messages per reply/push API call.
+const maxMessagesPerCall = 5
+
 // Handle delivers one reply: the (free) reply token first; if it has expired
-// or was already consumed, falls back to a push message.
+// or was already consumed, falls back to push messages.
+//
+// A reply token is single-use, so all parts must go out in one ReplyMessage
+// call rather than one call per part - otherwise only the first part would
+// use the free token and the rest would fall back to push anyway.
 func (c *Consumer) Handle(event ReplyEvent) {
 	if event.UserID == "" && event.ReplyToken == "" {
 		log.Error().Str("subject", Subject).Msg("consume: dropping event without user_id or reply_token")
@@ -59,26 +66,42 @@ func (c *Consumer) Handle(event ReplyEvent) {
 	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Msg("consume: reply event received")
 
 	parts := splitReplyMessages(event.Text)
+	messages := make([]linebot.SendingMessage, len(parts))
 	for i, part := range parts {
-		message := linebot.NewTextMessage(part)
-		if event.ReplyToken != "" {
-			if _, err := c.bot.ReplyMessage(event.ReplyToken, message).Do(); err == nil {
-				log.Info().Str("user_id", event.UserID).Int("part_index", i).Msg("deliver: sent via reply token")
-				continue
-			} else {
-				log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
-			}
-		}
+		messages[i] = linebot.NewTextMessage(part)
+	}
 
-		if event.UserID == "" {
-			log.Error().Msg("deliver: cannot push - no user_id")
-			return
+	if event.ReplyToken != "" {
+		replyBatch := messages
+		if len(replyBatch) > maxMessagesPerCall {
+			replyBatch = replyBatch[:maxMessagesPerCall]
 		}
-		if _, err := c.bot.PushMessage(event.UserID, message).Do(); err != nil {
+		if _, err := c.bot.ReplyMessage(event.ReplyToken, replyBatch...).Do(); err == nil {
+			log.Info().Str("user_id", event.UserID).Int("parts", len(replyBatch)).Msg("deliver: sent via reply token")
+			messages = messages[len(replyBatch):]
+			if len(messages) == 0 {
+				return
+			}
+		} else {
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
+		}
+	}
+
+	if event.UserID == "" {
+		log.Error().Msg("deliver: cannot push - no user_id")
+		return
+	}
+	for i := 0; i < len(messages); i += maxMessagesPerCall {
+		end := i + maxMessagesPerCall
+		if end > len(messages) {
+			end = len(messages)
+		}
+		batch := messages[i:end]
+		if _, err := c.bot.PushMessage(event.UserID, batch...).Do(); err != nil {
 			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: push message failed")
 			return
 		}
-		log.Info().Str("user_id", event.UserID).Int("part_index", i).Msg("deliver: sent via push message")
+		log.Info().Str("user_id", event.UserID).Int("parts", len(batch)).Msg("deliver: sent via push message")
 	}
 }
 
