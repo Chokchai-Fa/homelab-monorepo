@@ -40,16 +40,17 @@ type ReplyEvent struct {
 	Text       string `json:"text"`
 }
 
-// Consumer subscribes to AI requests, asks Gemini with conversation context
-// and publishes the answer as a reply event.
+// Consumer subscribes to AI requests, asks the LLM provider (usually the
+// difficulty router) with conversation context and publishes the answer as a
+// reply event.
 type Consumer struct {
 	store store.Store
-	ai    *ai.Gemini
+	ai    ai.Provider
 	nc    *nats.Conn
 }
 
-func New(s store.Store, g *ai.Gemini, nc *nats.Conn) *Consumer {
-	return &Consumer{store: s, ai: g, nc: nc}
+func New(s store.Store, p ai.Provider, nc *nats.Conn) *Consumer {
+	return &Consumer{store: s, ai: p, nc: nc}
 }
 
 // Subscribe attaches the consumer to NATS as a queue subscriber so future
@@ -122,10 +123,10 @@ func (c *Consumer) respond(ctx context.Context, event RequestEvent) string {
 	start := time.Now()
 	answer, err := c.ai.Reply(ctx, history, query)
 	if err != nil {
-		log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: gemini request failed")
+		log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: llm request failed")
 		return "Sorry, the AI is unavailable right now. Please try again later.\nขออภัย ตอนนี้ AI ไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง"
 	}
-	log.Info().Str("user_id", event.UserID).Dur("duration", time.Since(start)).Int("answer_chars", len(answer)).Msg("respond: gemini answered")
+	log.Info().Str("user_id", event.UserID).Dur("duration", time.Since(start)).Int("answer_chars", len(answer)).Msg("respond: llm answered")
 
 	if err := c.store.Append(ctx, event.UserID, store.RoleUser, query); err != nil {
 		log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: failed to store user message")

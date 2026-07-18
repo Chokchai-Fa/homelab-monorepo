@@ -23,29 +23,85 @@ const (
 )
 
 type Config struct {
-	NatsURL       string
-	NatsUser      string
-	NatsPassword  string
-	GeminiAPIKey  string
-	GeminiModel   string
-	DatabaseURL   string
-	RedisAddr     string
-	RedisUsername string
-	RedisPassword string
+	NatsURL      string
+	NatsUser     string
+	NatsPassword string
+	GeminiAPIKey string
+	GeminiModel  string
+	// Optional free-tier providers; each is enabled by setting its API key.
+	GroqAPIKey          string
+	GroqModel           string
+	GroqClassifierModel string
+	OpenRouterAPIKey    string
+	OpenRouterModel     string
+	DatabaseURL         string
+	RedisAddr           string
+	RedisUsername       string
+	RedisPassword       string
 }
 
 func loadConfig() *Config {
 	return &Config{
-		NatsURL:       getEnv("NATS_URL", nats.DefaultURL),
-		NatsUser:      getEnv("NATS_USER", ""),
-		NatsPassword:  getEnv("NATS_PASSWORD", ""),
-		GeminiAPIKey:  getEnv("GEMINI_API_KEY", ""),
-		GeminiModel:   getEnv("GEMINI_MODEL", "gemini-3.5-flash"),
-		DatabaseURL:   getEnv("DATABASE_URL", ""),
-		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisUsername: getEnv("REDIS_USERNAME", ""),
-		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		NatsURL:             getEnv("NATS_URL", nats.DefaultURL),
+		NatsUser:            getEnv("NATS_USER", ""),
+		NatsPassword:        getEnv("NATS_PASSWORD", ""),
+		GeminiAPIKey:        getEnv("GEMINI_API_KEY", ""),
+		GeminiModel:         getEnv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		GroqAPIKey:          getEnv("GROQ_API_KEY", ""),
+		GroqModel:           getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "llama-3.1-8b-instant"),
+		OpenRouterAPIKey:    getEnv("OPENROUTER_API_KEY", ""),
+		OpenRouterModel:     getEnv("OPENROUTER_MODEL", "deepseek/deepseek-r1:free"),
+		DatabaseURL:         getEnv("DATABASE_URL", ""),
+		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisUsername:       getEnv("REDIS_USERNAME", ""),
+		RedisPassword:       getEnv("REDIS_PASSWORD", ""),
 	}
+}
+
+// buildRouter assembles the difficulty router from whichever providers have
+// API keys configured. Gemini alone still works: every tier then falls back
+// to it.
+func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
+	var groq, openrouter ai.Provider
+	if config.GroqAPIKey != "" {
+		groq = ai.NewOpenAI("groq", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqModel, ai.PersonaInstruction)
+		log.Info().Str("model", config.GroqModel).Msg("startup: groq provider enabled")
+	}
+	if config.OpenRouterAPIKey != "" {
+		openrouter = ai.NewOpenAI("openrouter", "https://openrouter.ai/api/v1", config.OpenRouterAPIKey, config.OpenRouterModel, ai.PersonaInstruction)
+		log.Info().Str("model", config.OpenRouterModel).Msg("startup: openrouter provider enabled")
+	}
+
+	// Classifier: a tiny Groq model when available (fast, generous free
+	// quota), otherwise Gemini classifies its own traffic.
+	var classifier ai.Provider
+	if config.GroqAPIKey != "" {
+		classifier = ai.NewOpenAI("groq-classifier", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqClassifierModel, ai.ClassifierInstruction)
+	} else {
+		classifier = gemini.Derive("gemini-classifier", ai.ClassifierInstruction, false)
+	}
+
+	geminiDeep := gemini.Derive("gemini/"+config.GeminiModel+"+think", ai.PersonaInstruction, true)
+
+	chain := func(providers ...ai.Provider) []ai.Provider {
+		out := make([]ai.Provider, 0, len(providers))
+		for _, p := range providers {
+			if p != nil {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	// Priorities assume GEMINI_MODEL is a lite/high-quota model
+	// (gemini-3.1-flash-lite): it leads small talk, Groq's 70B leads real
+	// questions, and reasoning models lead technical with Gemini deep
+	// thinking (then plain) as last resorts.
+	return ai.NewRouter(classifier,
+		chain(gemini, groq, openrouter),             // simple
+		chain(groq, gemini, openrouter),             // general
+		chain(openrouter, groq, geminiDeep, gemini), // technical
+	)
 }
 
 func getEnv(key, defaultValue string) string {
@@ -94,6 +150,8 @@ func main() {
 	}
 	log.Info().Str("model", config.GeminiModel).Msg("startup: gemini client ready")
 
+	router := buildRouter(gemini, config)
+
 	nc, err := nats.Connect(config.NatsURL,
 		nats.UserInfo(config.NatsUser, config.NatsPassword),
 		nats.Name("consumer-llm-processor"),
@@ -106,7 +164,7 @@ func main() {
 	defer nc.Drain()
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
-	c := consumer.New(conversations, gemini, nc)
+	c := consumer.New(conversations, router, nc)
 	sub, err := c.Subscribe()
 	if err != nil {
 		log.Fatal().Str("subject", consumer.RequestSubject).Err(err).Msg("startup: failed to subscribe")
