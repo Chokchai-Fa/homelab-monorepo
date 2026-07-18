@@ -11,7 +11,7 @@ import (
 )
 
 func TestExtractMarkAsReadToken(t *testing.T) {
-	payload := []byte(`{"events":[{"type":"message","markAsReadToken":"tok-1"},{"type":"follow"}]}`)
+	payload := []byte(`{"events":[{"type":"message","message":{"markAsReadToken":"tok-1"}},{"type":"follow"}]}`)
 	got, err := extractMarkAsReadToken(payload, 0)
 	if err != nil {
 		t.Fatalf("extractMarkAsReadToken() error = %v", err)
