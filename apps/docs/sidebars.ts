@@ -26,7 +26,12 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Data services',
-      items: ['data-services/nats', 'data-services/postgres', 'data-services/redis'],
+      items: [
+        'data-services/nats',
+        'data-services/postgres',
+        'data-services/redis',
+        'data-services/minio',
+      ],
     },
     {
       type: 'category',

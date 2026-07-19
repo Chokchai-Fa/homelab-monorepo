@@ -30,6 +30,7 @@ flowchart LR
     end
     subgraph co ["ns: core"]
       natsm[nats :8222]
+      minio["minio :9000/:9001"]
     end
     subgraph portns["ns: portainer"]
       port[portainer :9000]
@@ -43,6 +44,7 @@ flowchart LR
   cfd --> docs
   cfd --> wg
   cfd --> natsm
+  cfd --> minio
   cfd --> port
 ```
 
@@ -74,15 +76,31 @@ maps public hostnames to cluster-internal Service DNS names:
 | `portainer.chokchai-dev.xyz` | `portainer.portainer.svc.cluster.local:9000` |
 | `codeserver.chokchai-dev.xyz` | `code-server.code-server.svc.cluster.local:8080` |
 | `nats.chokchai-dev.xyz` | `nats.core.svc.cluster.local:8222` (monitoring UI) |
+| `minio.chokchai-dev.xyz` | `minio.core.svc.cluster.local:9001` (MinIO console) |
+| `s3.chokchai-dev.xyz` | `minio.core.svc.cluster.local:9000` (MinIO S3 API) |
 | *(catch-all)* | `http_status:404` |
 
 :::info Adding a hostname
 Two steps: (1) add a `- hostname: … / service: http://<svc>.<ns>.svc.cluster.local:<port>`
 entry to the tunnel ConfigMap **above the catch-all 404**, and (2) create a
-Cloudflare DNS CNAME for that hostname pointing at the tunnel (done out-of-band
-in the Cloudflare dashboard — it is not a repo change). The `docs` hostname was
-added exactly this way.
+Cloudflare DNS CNAME for that hostname pointing at the tunnel — either in the
+Cloudflare dashboard or from the Pi, where the origin cert lives:
+`cloudflared tunnel route dns <tunnel-uuid> <hostname>`. Restart the
+`cloudflared` deployment after ConfigMap changes; Flux applies the ConfigMap
+but does not bounce the pod.
 :::
+
+## CoreDNS hairpin for `s3.chokchai-dev.xyz`
+
+One hostname resolves differently inside the cluster than outside: a
+`coredns-custom` ConfigMap (`infrastructure/networking/coredns/`) rewrites
+`s3.chokchai-dev.xyz` to `minio.core.svc.cluster.local`, so pods talking to
+the public S3 hostname reach MinIO directly instead of looping out through
+the Cloudflare edge — whose proxy corrupts S3 `aws-chunked` request
+signatures. This is what makes MinIO console share links publicly valid.
+Full explanation in [MinIO](../data-services/minio.md). k3s supports this
+out of the box: its CoreDNS imports `/etc/coredns/custom/*.override` from
+that ConfigMap if it exists.
 
 ## Why a tunnel instead of ingress + LoadBalancer?
 
