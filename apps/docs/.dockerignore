@@ -1,0 +1,6 @@
+# Keep the build context small and the COPY . . layer cache-stable: local
+# installs and previous build output must never ship to the daemon.
+node_modules
+build
+.docusaurus
+npm-debug.log*

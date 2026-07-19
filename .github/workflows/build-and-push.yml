@@ -117,6 +117,9 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
           build-args: ${{ matrix.buildArgsStr }}
+          # No SLSA provenance attestations: nothing consumes them (Flux only
+          # matches tags) and they add an extra manifest per push.
+          provenance: false
           push: true
           tags: docker.io/${{ secrets.DOCKER_USERNAME }}/${{ matrix.image }}:${{ steps.meta.outputs.tag }}
           cache-from: |
