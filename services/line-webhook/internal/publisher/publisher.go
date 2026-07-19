@@ -8,10 +8,13 @@ import (
 
 // Subjects of the LINE chat pipeline. AIRequestSubject must match the
 // subscriber in services/consumer-llm-processor; ReplySubject must match
-// services/consumer-reply-line-user.
+// services/consumer-reply-line-user; PostbackSubject and ProfileSubject
+// must match services/consumer-reminder.
 const (
 	AIRequestSubject = "line.chat.ai_request"
 	ReplySubject     = "line.chat.reply"
+	PostbackSubject  = "line.chat.postback"
+	ProfileSubject   = "line.chat.profile"
 )
 
 // AIRequestEvent is consumed by consumer-llm-processor. Text has the AI
@@ -32,6 +35,24 @@ type ReplyEvent struct {
 	UserID     string `json:"user_id"`
 	ReplyToken string `json:"reply_token"`
 	Text       string `json:"text"`
+}
+
+// PostbackEvent carries a quick-reply button press to consumer-reminder.
+// Data is the raw postback payload (query-string style, e.g.
+// "flow=rem&a=target&v=self").
+type PostbackEvent struct {
+	UserID     string `json:"user_id"`
+	ReplyToken string `json:"reply_token"`
+	Data       string `json:"data"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
+// ProfileEvent hands a LINE profile fetched by the webhook to
+// consumer-reminder, which owns the line_users table.
+type ProfileEvent struct {
+	UserID      string `json:"user_id"`
+	DisplayName string `json:"display_name"`
+	Timestamp   int64  `json:"timestamp"`
 }
 
 // Publisher publishes LINE chat events to NATS.
@@ -61,6 +82,16 @@ func (p *Publisher) PublishAIRequest(event AIRequestEvent) error {
 // PublishReply sends one event to the reply subject.
 func (p *Publisher) PublishReply(event ReplyEvent) error {
 	return p.publish(ReplySubject, event)
+}
+
+// PublishPostback sends one event to the postback subject.
+func (p *Publisher) PublishPostback(event PostbackEvent) error {
+	return p.publish(PostbackSubject, event)
+}
+
+// PublishProfile sends one event to the profile subject.
+func (p *Publisher) PublishProfile(event ProfileEvent) error {
+	return p.publish(ProfileSubject, event)
 }
 
 func (p *Publisher) publish(subject string, event any) error {

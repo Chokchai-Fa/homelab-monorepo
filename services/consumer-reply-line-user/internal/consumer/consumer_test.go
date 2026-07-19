@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -47,6 +48,66 @@ func TestBuildMessages(t *testing.T) {
 		}
 		if _, ok := msgs[0].(*linebot.ImageMessage); !ok {
 			t.Errorf("message = %#v, want image", msgs[0])
+		}
+	})
+
+	t.Run("flex before text", func(t *testing.T) {
+		flex := []byte(`{"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"remind"}]}}`)
+		msgs := c.buildMessages(ReplyEvent{Flex: flex, AltText: "alt", Text: "caption"})
+		if len(msgs) != 2 {
+			t.Fatalf("got %d messages, want 2", len(msgs))
+		}
+		fm, ok := msgs[0].(*linebot.FlexMessage)
+		if !ok {
+			t.Fatalf("first message is %T, want *linebot.FlexMessage", msgs[0])
+		}
+		if fm.AltText != "alt" {
+			t.Errorf("alt text = %q, want %q", fm.AltText, "alt")
+		}
+	})
+
+	t.Run("invalid flex falls back to text", func(t *testing.T) {
+		msgs := c.buildMessages(ReplyEvent{Flex: []byte(`{not json`), Text: "fallback"})
+		if len(msgs) != 1 {
+			t.Fatalf("got %d messages, want 1", len(msgs))
+		}
+		if txt, ok := msgs[0].(*linebot.TextMessage); !ok || txt.Text != "fallback" {
+			t.Errorf("message = %#v, want text fallback", msgs[0])
+		}
+	})
+
+	t.Run("quick replies attach to last message", func(t *testing.T) {
+		flex := []byte(`{"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"remind"}]}}`)
+		msgs := c.buildMessages(ReplyEvent{
+			Flex: flex,
+			Text: "pick one",
+			QuickReplies: []QuickReply{
+				{Label: "Myself", Data: "flow=rem&a=target&v=self"},
+				{Label: "Cancel", Data: "flow=rem&a=cancel", DisplayText: "cancel"},
+			},
+		})
+		if len(msgs) != 2 {
+			t.Fatalf("got %d messages, want 2", len(msgs))
+		}
+		// quickReplyItems is unexported, so assert through the wire JSON.
+		lastJSON, err := json.Marshal(msgs[len(msgs)-1])
+		if err != nil {
+			t.Fatalf("marshal last message: %v", err)
+		}
+		if !strings.Contains(string(lastJSON), `"quickReply"`) {
+			t.Fatalf("last message JSON missing quickReply: %s", lastJSON)
+		}
+		// json.Marshal HTML-escapes the ampersands in postback data, so
+		// match on a fragment that has none.
+		if !strings.Contains(string(lastJSON), "flow=rem") {
+			t.Errorf("last message JSON missing postback data: %s", lastJSON)
+		}
+		firstJSON, err := json.Marshal(msgs[0])
+		if err != nil {
+			t.Fatalf("marshal first message: %v", err)
+		}
+		if strings.Contains(string(firstJSON), `"quickReply"`) {
+			t.Error("quick replies also attached to a non-last message")
 		}
 	})
 }

@@ -23,6 +23,7 @@ type RouterOptions struct {
 	Sessions  handler.SessionStore
 	Images    handler.ImageStore
 	GenImages handler.GeneratedImageStore
+	Profiles  handler.ProfileGate
 	Bot       *linebot.Client
 }
 
@@ -38,7 +39,7 @@ func NewRouter(opts RouterOptions) *echo.Echo {
 	e.Use(middleware.CORS())
 
 	// Routes
-	h := handler.New(opts.Config, opts.Publisher, opts.Sessions, opts.Images, opts.Bot)
+	h := handler.New(opts.Config, opts.Publisher, opts.Sessions, opts.Images, opts.Profiles, opts.Bot)
 	// Health check
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{

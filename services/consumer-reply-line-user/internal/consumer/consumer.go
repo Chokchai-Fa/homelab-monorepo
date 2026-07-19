@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
@@ -14,16 +15,45 @@ import (
 const (
 	Subject    = "line.chat.reply"
 	QueueGroup = "consumer-reply-line-user"
+
+	// DeliverySubject carries delivery acks for reminder events so
+	// subscriber-reminder-notifier can mark reminders sent/failed.
+	DeliverySubject = "line.chat.delivery"
 )
 
-// ReplyEvent is published by line-webhook and consumer-llm-processor.
+// QuickReply becomes a LINE quick-reply button with a postback action,
+// attached to the last message of the reply.
+type QuickReply struct {
+	Label       string `json:"label"`
+	Data        string `json:"data"`
+	DisplayText string `json:"display_text,omitempty"`
+}
+
+// ReplyEvent is published by line-webhook, consumer-llm-processor,
+// consumer-reminder and subscriber-reminder-notifier.
 // ImageKey names a generated image that line-webhook serves publicly at
 // /images/<key>; it becomes a LINE image message ahead of any text.
+// Flex is a flex bubble/carousel container JSON sent ahead of everything
+// else. ReminderID, when non-zero, makes this consumer publish a
+// DeliveryEvent ack after the send attempt.
 type ReplyEvent struct {
-	UserID     string `json:"user_id"`
-	ReplyToken string `json:"reply_token"`
-	Text       string `json:"text"`
-	ImageKey   string `json:"image_key,omitempty"`
+	UserID       string          `json:"user_id"`
+	ReplyToken   string          `json:"reply_token"`
+	Text         string          `json:"text"`
+	ImageKey     string          `json:"image_key,omitempty"`
+	Flex         json.RawMessage `json:"flex,omitempty"`
+	AltText      string          `json:"alt_text,omitempty"`
+	QuickReplies []QuickReply    `json:"quick_replies,omitempty"`
+	ReminderID   int64           `json:"reminder_id,omitempty"`
+}
+
+// DeliveryEvent reports the outcome of delivering a reminder reply.
+// ErrorCode is the HTTP status LINE returned (429 = push quota exhausted).
+type DeliveryEvent struct {
+	ReminderID int64  `json:"reminder_id"`
+	OK         bool   `json:"ok"`
+	ErrorCode  int    `json:"error_code,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Consumer subscribes to reply events and delivers them to LINE users.
@@ -32,6 +62,7 @@ type ReplyEvent struct {
 type Consumer struct {
 	bot          *linebot.Client
 	imageBaseURL string
+	nc           *nats.Conn // set by Subscribe; used for delivery acks
 }
 
 func New(bot *linebot.Client, imageBaseURL string) *Consumer {
@@ -39,8 +70,9 @@ func New(bot *linebot.Client, imageBaseURL string) *Consumer {
 }
 
 // Subscribe attaches the consumer to NATS as a queue subscriber so future
-// replicas share the work.
+// replicas share the work. The connection is kept for delivery acks.
 func (c *Consumer) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
+	c.nc = nc
 	return nc.QueueSubscribe(Subject, QueueGroup, func(msg *nats.Msg) {
 		var event ReplyEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
@@ -65,17 +97,28 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		log.Error().Str("subject", Subject).Msg("consume: dropping event without user_id or reply_token")
 		return
 	}
-	if event.Text == "" && event.ImageKey == "" {
+	if event.Text == "" && event.ImageKey == "" && len(event.Flex) == 0 {
 		log.Error().Str("user_id", event.UserID).Msg("consume: dropping empty reply")
+		c.ackDelivery(event, false, errors.New("empty reply"))
 		return
 	}
-	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Bool("image", event.ImageKey != "").Msg("consume: reply event received")
+	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Bool("image", event.ImageKey != "").Bool("flex", len(event.Flex) > 0).Msg("consume: reply event received")
 
 	messages := c.buildMessages(event)
 	if len(messages) == 0 {
 		log.Error().Str("user_id", event.UserID).Msg("consume: nothing deliverable in reply")
+		c.ackDelivery(event, false, errors.New("nothing deliverable"))
 		return
 	}
+
+	delivered, err := c.deliver(event, messages)
+	c.ackDelivery(event, delivered, err)
+}
+
+// deliver sends the messages, reply token first (free), push as fallback and
+// overflow. Returns whether at least one batch went out, and the last error.
+func (c *Consumer) deliver(event ReplyEvent, messages []linebot.SendingMessage) (bool, error) {
+	delivered := false
 
 	if event.ReplyToken != "" {
 		replyBatch := messages
@@ -84,9 +127,10 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		}
 		if _, err := c.bot.ReplyMessage(event.ReplyToken, replyBatch...).Do(); err == nil {
 			log.Info().Str("user_id", event.UserID).Int("parts", len(replyBatch)).Msg("deliver: sent via reply token")
+			delivered = true
 			messages = messages[len(replyBatch):]
 			if len(messages) == 0 {
-				return
+				return true, nil
 			}
 		} else {
 			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
@@ -95,7 +139,7 @@ func (c *Consumer) Handle(event ReplyEvent) {
 
 	if event.UserID == "" {
 		log.Error().Msg("deliver: cannot push - no user_id")
-		return
+		return delivered, errors.New("cannot push: no user_id")
 	}
 	for i := 0; i < len(messages); i += maxMessagesPerCall {
 		end := i + maxMessagesPerCall
@@ -105,17 +149,62 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		batch := messages[i:end]
 		if _, err := c.bot.PushMessage(event.UserID, batch...).Do(); err != nil {
 			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: push message failed")
-			return
+			return delivered, err
 		}
+		delivered = true
 		log.Info().Str("user_id", event.UserID).Int("parts", len(batch)).Msg("deliver: sent via push message")
 	}
+	return delivered, nil
 }
 
-// buildMessages turns a reply event into LINE messages: the generated image
-// first (as an image message pointing at line-webhook's public /images
-// endpoint), then the text split into chat-sized parts.
+// ackDelivery publishes a DeliveryEvent for reminder replies so
+// subscriber-reminder-notifier can mark the reminder sent or failed. A 429
+// error code tells it the push quota is exhausted (retry later).
+func (c *Consumer) ackDelivery(event ReplyEvent, ok bool, err error) {
+	if event.ReminderID == 0 {
+		return
+	}
+	ack := DeliveryEvent{ReminderID: event.ReminderID, OK: ok}
+	if err != nil {
+		ack.Error = err.Error()
+		var apiErr *linebot.APIError
+		if errors.As(err, &apiErr) {
+			ack.ErrorCode = apiErr.Code
+		}
+	}
+	if c.nc == nil {
+		log.Error().Int64("reminder_id", event.ReminderID).Msg("ack: no NATS connection - delivery ack dropped")
+		return
+	}
+	data, marshalErr := json.Marshal(ack)
+	if marshalErr != nil {
+		log.Error().Int64("reminder_id", event.ReminderID).Err(marshalErr).Msg("ack: marshal failed")
+		return
+	}
+	if pubErr := c.nc.Publish(DeliverySubject, data); pubErr != nil {
+		log.Error().Int64("reminder_id", event.ReminderID).Err(pubErr).Msg("ack: publish failed")
+		return
+	}
+	log.Info().Int64("reminder_id", event.ReminderID).Bool("ok", ok).Int("error_code", ack.ErrorCode).Msg("ack: delivery reported")
+}
+
+// buildMessages turns a reply event into LINE messages: the flex bubble
+// first, then the generated image (pointing at line-webhook's public /images
+// endpoint), then the text split into chat-sized parts. Quick-reply buttons
+// attach to the last message (LINE only shows them there).
 func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
 	var messages []linebot.SendingMessage
+	if len(event.Flex) > 0 {
+		if container, err := linebot.UnmarshalFlexMessageJSON(event.Flex); err == nil {
+			altText := event.AltText
+			if altText == "" {
+				altText = "Reminder"
+			}
+			messages = append(messages, linebot.NewFlexMessage(altText, container))
+		} else {
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("build: invalid flex JSON - falling back to text")
+		}
+	}
 	if event.ImageKey != "" {
 		if c.imageBaseURL == "" {
 			log.Error().Str("user_id", event.UserID).Msg("build: image reply but IMAGE_BASE_URL not set - sending text only")
@@ -126,6 +215,16 @@ func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
 	}
 	for _, part := range splitReplyMessages(event.Text) {
 		messages = append(messages, linebot.NewTextMessage(part))
+	}
+
+	if len(messages) > 0 && len(event.QuickReplies) > 0 {
+		buttons := make([]*linebot.QuickReplyButton, 0, len(event.QuickReplies))
+		for _, q := range event.QuickReplies {
+			buttons = append(buttons, linebot.NewQuickReplyButton("",
+				linebot.NewPostbackAction(q.Label, q.Data, "", q.DisplayText, "", "")))
+		}
+		last := len(messages) - 1
+		messages[last] = messages[last].WithQuickReplies(linebot.NewQuickReplyItems(buttons...))
 	}
 	return messages
 }

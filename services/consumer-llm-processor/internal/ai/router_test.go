@@ -73,6 +73,23 @@ func TestRouterRoutesByTier(t *testing.T) {
 	}
 }
 
+func TestRouterReminderIntentShortCircuits(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "reminder"}
+	general := &fakeProvider{name: "g", answer: "general-answer"}
+	r := newTestRouter(classifier, nil, []Provider{general}, nil, nil, nil)
+
+	got, err := r.Route(context.Background(), nil, "เตือนพรุ่งนี้ 9 โมง กินยา", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.ReminderIntent {
+		t.Fatal("expected ReminderIntent to be set")
+	}
+	if got.Text != "" {
+		t.Errorf("reminder intent must not produce chat text, got %q", got.Text)
+	}
+}
+
 func TestRouterFallsBackOnProviderError(t *testing.T) {
 	broken := &fakeProvider{name: "broken", err: errors.New("status 429")}
 	backup := &fakeProvider{name: "backup", answer: "backup-answer"}

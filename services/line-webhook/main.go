@@ -13,10 +13,15 @@ import (
 
 	"line-webhook/internal/handler"
 	"line-webhook/internal/imagecache"
+	"line-webhook/internal/profilegate"
 	"line-webhook/internal/publisher"
 	"line-webhook/internal/router"
 	"line-webhook/internal/session"
 )
+
+// profileGateTTL bounds how often the webhook refreshes a user's LINE
+// profile (display name) via GetProfile.
+const profileGateTTL = 24 * time.Hour
 
 type Config struct {
 	ChannelSecret string
@@ -116,6 +121,7 @@ func main() {
 	var sessions handler.SessionStore
 	var images handler.ImageStore
 	var genImages handler.GeneratedImageStore
+	var profiles handler.ProfileGate
 	if config.RedisAddr != "" {
 		rdb := redis.NewClient(&redis.Options{
 			Addr:     config.RedisAddr,
@@ -131,6 +137,7 @@ func main() {
 		store := imagecache.New(rdb)
 		images = store
 		genImages = store
+		profiles = profilegate.New(rdb, profileGateTTL)
 	} else {
 		log.Info().Msg("startup: REDIS_ADDR not set - AI session mode disabled (prefix-only), images disabled")
 	}
@@ -148,7 +155,7 @@ func main() {
 
 	// Initialize Echo via router package and start server
 	e := router.NewRouter(router.RouterOptions{
-		Echo:      nil, // router will create a new Echo instance if nil
+		Echo: nil, // router will create a new Echo instance if nil
 		Config: &handler.Config{
 			ChannelSecret: config.ChannelSecret,
 			ChannelToken:  config.ChannelToken,
@@ -160,6 +167,7 @@ func main() {
 		Sessions:  sessions,
 		Images:    images,
 		GenImages: genImages,
+		Profiles:  profiles,
 		Bot:       bot,
 	})
 

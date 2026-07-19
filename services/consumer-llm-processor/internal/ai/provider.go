@@ -41,4 +41,5 @@ const ClassifierInstruction = `You classify chat messages (Thai, English or any 
 simple - greetings, small talk, jokes, short casual questions.
 general - everyday questions with a factual or advisory answer (travel, food, news, opinions).
 technical - programming, math, science, debugging, or anything needing multi-step reasoning.
-image - the user asks you to create, generate or draw a picture/artwork (e.g. "draw a cat", "วาดรูปแมวให้หน่อย", "generate an image of ...").`
+image - the user asks you to create, generate or draw a picture/artwork (e.g. "draw a cat", "วาดรูปแมวให้หน่อย", "generate an image of ...").
+reminder - the user asks to be reminded of something at a time, or to set/schedule a reminder or alarm (e.g. "เตือนพรุ่งนี้ 9 โมง กินยา", "remind me to call mom at 6pm", "ตั้งเตือนตอนเย็น").`

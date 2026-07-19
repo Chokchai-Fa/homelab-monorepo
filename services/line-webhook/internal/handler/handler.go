@@ -20,6 +20,7 @@ type LineHandler struct {
 	pub      EventPublisher
 	sessions SessionStore
 	images   ImageStore
+	profiles ProfileGate
 	bot      *linebot.Client
 }
 
@@ -58,6 +59,13 @@ type GeneratedImageStore interface {
 	GetGenerated(ctx context.Context, id string) ([]byte, error)
 }
 
+// ProfileGate rate-limits GetProfile calls to once per user per TTL; nil
+// disables profile publishing.
+type ProfileGate interface {
+	TryClaim(ctx context.Context, userID string) bool
+	Release(ctx context.Context, userID string)
+}
+
 // Handler defines the public behavior for a webhook handler.
 // It is kept small so it can be easily mocked in tests.
 type Handler interface {
@@ -69,9 +77,11 @@ type Handler interface {
 type EventPublisher interface {
 	PublishAIRequest(event publisher.AIRequestEvent) error
 	PublishReply(event publisher.ReplyEvent) error
+	PublishPostback(event publisher.PostbackEvent) error
+	PublishProfile(event publisher.ProfileEvent) error
 }
 
 // New creates a new LineHandler instance that implements Handler.
-func New(cfg *Config, pub EventPublisher, sessions SessionStore, images ImageStore, bot *linebot.Client) Handler {
-	return &LineHandler{cfg: cfg, pub: pub, sessions: sessions, images: images, bot: bot}
+func New(cfg *Config, pub EventPublisher, sessions SessionStore, images ImageStore, profiles ProfileGate, bot *linebot.Client) Handler {
+	return &LineHandler{cfg: cfg, pub: pub, sessions: sessions, images: images, profiles: profiles, bot: bot}
 }

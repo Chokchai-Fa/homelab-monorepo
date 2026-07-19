@@ -78,3 +78,48 @@ services:
     paths:
       - "services/consumer-reply-line-user/**"
       - "build/go/**"
+
+  - name: consumer-reminder
+    image: consumer-reminder
+    context: services/consumer-reminder
+    dockerfile: build/go/Dockerfile
+    versionFile: services/consumer-reminder/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      GO_VERSION: "1.25"
+      MAIN_PATH: "./"
+      PORT: "8080"
+    test: "go test ./..."
+    paths:
+      - "services/consumer-reminder/**"
+      - "build/go/**"
+
+  - name: worker-reminder-scheduler
+    image: worker-reminder-scheduler
+    context: services/worker-reminder-scheduler
+    dockerfile: build/go/Dockerfile
+    versionFile: services/worker-reminder-scheduler/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      GO_VERSION: "1.25"
+      MAIN_PATH: "./"
+      PORT: "8080"
+    test: "go test ./..."
+    paths:
+      - "services/worker-reminder-scheduler/**"
+      - "build/go/**"
+
+  - name: subscriber-reminder-notifier
+    image: subscriber-reminder-notifier
+    context: services/subscriber-reminder-notifier
+    dockerfile: build/go/Dockerfile
+    versionFile: services/subscriber-reminder-notifier/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      GO_VERSION: "1.25"
+      MAIN_PATH: "./"
+      PORT: "8080"
+    test: "go test ./..."
+    paths:
+      - "services/subscriber-reminder-notifier/**"
+      - "build/go/**"

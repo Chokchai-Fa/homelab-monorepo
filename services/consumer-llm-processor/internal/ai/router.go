@@ -18,17 +18,22 @@ const (
 	TierSimple    Tier = "simple"
 	TierGeneral   Tier = "general"
 	TierTechnical Tier = "technical"
-	TierImage     Tier = "image" // user asks to generate a picture
+	TierImage     Tier = "image"    // user asks to generate a picture
+	TierReminder  Tier = "reminder" // user asks to set a reminder
 
 	classifyTimeout = 10 * time.Second
 )
 
 // Result is what the router hands back: an answer text, or a generated
 // image (with optional caption text) when the user asked for a picture.
+// ReminderIntent means the message belongs to consumer-reminder; this
+// service stays a pure router, so the caller republishes the request there
+// and no chain is consulted.
 type Result struct {
-	Text      string
-	ImageData []byte
-	ImageMime string
+	Text           string
+	ImageData      []byte
+	ImageMime      string
+	ReminderIntent bool
 }
 
 // Router picks a provider chain per question difficulty and falls back to the
@@ -71,6 +76,10 @@ func (r *Router) Route(ctx context.Context, history []store.Message, userMessage
 	chain := r.vision
 	if image == nil {
 		tier := r.classify(ctx, userMessage)
+		if tier == TierReminder {
+			log.Info().Str("tier", string(TierReminder)).Msg("route: reminder intent - handing off")
+			return Result{ReminderIntent: true}, nil
+		}
 		if tier == TierImage && r.imageGen != nil {
 			return r.generateImage(ctx, userMessage)
 		}
@@ -119,6 +128,8 @@ func (r *Router) classify(ctx context.Context, userMessage string) Tier {
 		return TierGeneral
 	}
 	switch v := strings.ToLower(strings.TrimSpace(verdict)); {
+	case strings.Contains(v, "reminder"):
+		return TierReminder
 	case strings.Contains(v, "technical"):
 		return TierTechnical
 	case strings.Contains(v, "image"):

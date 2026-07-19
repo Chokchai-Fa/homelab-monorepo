@@ -136,6 +136,7 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	userMessage := message.Text
 	trimmed := strings.TrimSpace(userMessage)
 	log.Info().Str("user_id", event.Source.UserID).Str("text", userMessage).Msg("webhook: text message received")
+	h.ensureProfile(event.Source.UserID)
 
 	// AI session lifecycle: "/ai" starts a session (messages flow to the AI
 	// without any prefix), "/ai-end" ends it, and it auto-expires after the
@@ -145,6 +146,16 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	}
 	if h.isAIRequest(userMessage) {
 		return h.handleAIStart(event, trimmed)
+	}
+	// Reminder trigger keywords reach the AI pipeline even outside an AI
+	// session: consumer-llm-processor detects the intent, extracts the
+	// details and hands off to consumer-reminder. The session is NOT started
+	// here; consumer-reminder keeps it alive while its flow runs (which is
+	// also what keeps mid-flow free text flowing through this branch or the
+	// session branch below).
+	if isReminderRequest(trimmed) {
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: reminder keyword - forwarding to AI pipeline")
+		return h.publishAIRequest(event, trimmed)
 	}
 	if h.sessions != nil && event.Source.UserID != "" && h.sessions.Active(context.Background(), event.Source.UserID) {
 		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: active AI session - routing message to AI")
@@ -168,6 +179,46 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 func (h *LineHandler) isAIRequest(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	return trimmed == h.cfg.AIPrefix || strings.HasPrefix(trimmed, h.cfg.AIPrefix+" ")
+}
+
+// isReminderRequest reports whether the message starts a reminder: the hard
+// keyword "/reminder" (alone or with details) or Thai "ตั้งเตือน..." (no
+// space needed - Thai doesn't use them). Must match consumer-llm-processor's
+// view of a trigger.
+func isReminderRequest(trimmed string) bool {
+	return trimmed == "/reminder" ||
+		strings.HasPrefix(trimmed, "/reminder ") ||
+		strings.HasPrefix(trimmed, "ตั้งเตือน")
+}
+
+// ensureProfile fetches and publishes the user's LINE profile at most once
+// per gate TTL, so consumer-reminder can keep the line_users table fresh.
+// Runs in the background - profile upkeep must never delay a reply.
+func (h *LineHandler) ensureProfile(userID string) {
+	if userID == "" || h.profiles == nil || h.bot == nil || h.pub == nil {
+		return
+	}
+	if !h.profiles.TryClaim(context.Background(), userID) {
+		return
+	}
+	go func() {
+		profile, err := h.bot.GetProfile(userID).Do()
+		if err != nil {
+			log.Error().Str("user_id", userID).Err(err).Msg("webhook: profile fetch failed - releasing gate for retry")
+			h.profiles.Release(context.Background(), userID)
+			return
+		}
+		if err := h.pub.PublishProfile(publisher.ProfileEvent{
+			UserID:      userID,
+			DisplayName: profile.DisplayName,
+			Timestamp:   time.Now().UnixMilli(),
+		}); err != nil {
+			log.Error().Str("user_id", userID).Err(err).Msg("webhook: failed to publish profile - releasing gate for retry")
+			h.profiles.Release(context.Background(), userID)
+			return
+		}
+		log.Info().Str("user_id", userID).Str("display_name", profile.DisplayName).Msg("webhook: profile published")
+	}()
 }
 
 // handleAIStart opens (or refreshes) the user's AI session and forwards the
@@ -240,6 +291,7 @@ const defaultMaxImageBytes = 10 << 20
 func (h *LineHandler) handleImageMessage(event *linebot.Event, message *linebot.ImageMessage) error {
 	userID := event.Source.UserID
 	log.Info().Str("user_id", userID).Str("message_id", message.ID).Msg("webhook: image message received")
+	h.ensureProfile(userID)
 
 	if h.sessions == nil || userID == "" || !h.sessions.Active(context.Background(), userID) {
 		return h.reply(event, "Start an AI session first with "+h.cfg.AIPrefix+", then send your image.\nเริ่มคุยกับ AI ด้วย "+h.cfg.AIPrefix+" ก่อน แล้วค่อยส่งรูปมาน้า~")
@@ -288,23 +340,35 @@ func (h *LineHandler) handleImageMessage(event *linebot.Event, message *linebot.
 
 func (h *LineHandler) handleFollowEvent(event *linebot.Event) error {
 	log.Info().Str("user_id", event.Source.UserID).Msg("webhook: user followed")
+	h.ensureProfile(event.Source.UserID)
 
 	welcomeMessage := "Welcome! Thank you for adding me as a friend. \n\nSend me any message and I'll echo it back to you!\n\nType 'help' to see available commands."
 
 	return h.reply(event, welcomeMessage)
 }
 
+// handlePostbackEvent forwards the raw postback payload to NATS for
+// consumer-reminder; the webhook does no parsing of its own.
 func (h *LineHandler) handlePostbackEvent(event *linebot.Event) error {
 	postback := event.Postback
 	log.Info().Str("user_id", event.Source.UserID).Str("data", postback.Data).Msg("webhook: postback received")
+	h.ensureProfile(event.Source.UserID)
 
-	var response map[string]interface{}
-	if err := json.Unmarshal([]byte(postback.Data), &response); err != nil {
-		log.Error().Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to parse postback data")
+	if h.pub == nil {
+		log.Error().Str("user_id", event.Source.UserID).Msg("webhook: postback dropped - NATS publisher not connected")
 		return nil
 	}
-
-	return h.reply(event, fmt.Sprintf("Received postback: %v", response))
+	if err := h.pub.PublishPostback(publisher.PostbackEvent{
+		UserID:     event.Source.UserID,
+		ReplyToken: event.ReplyToken,
+		Data:       postback.Data,
+		Timestamp:  event.Timestamp.UnixMilli(),
+	}); err != nil {
+		log.Error().Str("subject", publisher.PostbackSubject).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to publish postback")
+		return err
+	}
+	log.Info().Str("subject", publisher.PostbackSubject).Str("user_id", event.Source.UserID).Msg("webhook: postback published")
+	return nil
 }
 
 // reply publishes an outgoing message for consumer-reply-line-user to send.

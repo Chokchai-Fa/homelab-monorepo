@@ -14,7 +14,9 @@ import (
 
 	"consumer-llm-processor/internal/ai"
 	"consumer-llm-processor/internal/consumer"
+	"consumer-llm-processor/internal/extract"
 	"consumer-llm-processor/internal/imagecache"
+	"consumer-llm-processor/internal/reminderflow"
 	"consumer-llm-processor/internal/store"
 )
 
@@ -74,17 +76,17 @@ func loadConfig() *Config {
 		OpenRouterAPIKey:    getEnv("OPENROUTER_API_KEY", ""),
 		// OpenRouter's :free lineup rotates (deepseek-r1:free died 2026-07);
 		// verify against https://openrouter.ai/api/v1/models when it 404s.
-		OpenRouterModel:     getEnv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free"),
-		OpenRouterVision:    getEnv("OPENROUTER_VISION_MODEL", "google/gemma-4-31b-it:free"),
-		DatabaseURL:         getEnv("DATABASE_URL", ""),
-		RedisAddr:           getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisUsername:       getEnv("REDIS_USERNAME", ""),
-		RedisPassword:       getEnv("REDIS_PASSWORD", ""),
+		OpenRouterModel:  getEnv("OPENROUTER_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free"),
+		OpenRouterVision: getEnv("OPENROUTER_VISION_MODEL", "google/gemma-4-31b-it:free"),
+		DatabaseURL:      getEnv("DATABASE_URL", ""),
+		RedisAddr:        getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisUsername:    getEnv("REDIS_USERNAME", ""),
+		RedisPassword:    getEnv("REDIS_PASSWORD", ""),
 		// Every reply pays this delay, but bursts split when the gap between
 		// fragments exceeds it. Tune from the "debounce: merged burst" logs:
 		// rare merges mean it can go lower.
-		DebounceWindow:      getEnvDuration("DEBOUNCE_WINDOW", 5*time.Second),
-		DebounceMaxWait:     getEnvDuration("DEBOUNCE_MAX_WAIT", 15*time.Second),
+		DebounceWindow:  getEnvDuration("DEBOUNCE_WINDOW", 5*time.Second),
+		DebounceMaxWait: getEnvDuration("DEBOUNCE_MAX_WAIT", 15*time.Second),
 	}
 }
 
@@ -229,7 +231,21 @@ func main() {
 	defer nc.Drain()
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
-	c := consumer.New(conversations, router, images, nc, config.DebounceWindow, config.DebounceMaxWait)
+	// Reminder handoff: the small extractor pulls message+time out of
+	// reminder asks before they're handed to consumer-reminder, and the flow
+	// checker routes mid-flow answers there (both share llm-processor's
+	// Redis with consumer-reminder).
+	var extractor extract.Extractor
+	if config.GroqAPIKey != "" {
+		extractor = &extract.Groq{APIKey: config.GroqAPIKey, Model: config.GroqClassifierModel}
+		log.Info().Str("model", config.GroqClassifierModel).Msg("startup: groq reminder extractor ready")
+	} else {
+		extractor = &extract.Gemini{APIKey: config.GeminiAPIKey, Model: config.GeminiModel}
+		log.Info().Str("model", config.GeminiModel).Msg("startup: gemini reminder extractor ready")
+	}
+	flows := reminderflow.New(rdb)
+
+	c := consumer.New(conversations, router, images, nc, config.DebounceWindow, config.DebounceMaxWait, extractor, flows)
 	// Answer buffered bursts before draining NATS on shutdown (defers run
 	// LIFO, so Flush precedes Drain).
 	defer c.Flush()

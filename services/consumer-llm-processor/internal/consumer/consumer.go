@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"consumer-llm-processor/internal/ai"
+	"consumer-llm-processor/internal/extract"
 	"consumer-llm-processor/internal/store"
 )
 
@@ -22,7 +23,10 @@ import (
 const (
 	RequestSubject = "line.chat.ai_request"
 	ReplySubject   = "line.chat.reply"
-	QueueGroup     = "consumer-llm-processor"
+	// ReminderRequestSubject hands reminder-intent messages to
+	// consumer-reminder; this service only detects the intent.
+	ReminderRequestSubject = "line.chat.reminder_request"
+	QueueGroup             = "consumer-llm-processor"
 
 	generateTimeout = 60 * time.Second
 )
@@ -51,6 +55,26 @@ type ReplyEvent struct {
 	ImageKey   string `json:"image_key,omitempty"`
 }
 
+// ReminderRequestEvent is consumed by consumer-reminder, which owns the
+// whole reminder conversation. This service does the language work first:
+// Message and RemindAt (RFC3339, +07:00) carry what the extractor LLM found
+// in Text; either may be empty, in which case consumer-reminder asks the
+// user for the missing part.
+type ReminderRequestEvent struct {
+	UserID     string `json:"user_id"`
+	ReplyToken string `json:"reply_token"`
+	Text       string `json:"text"`
+	Message    string `json:"message,omitempty"`
+	RemindAt   string `json:"remind_at,omitempty"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
+// FlowChecker reports whether the user is mid reminder-conversation (state
+// owned by consumer-reminder); nil disables mid-flow routing.
+type FlowChecker interface {
+	Active(ctx context.Context, userID string) bool
+}
+
 // ImageStore moves image bytes through the Redis handoff: Take fetches an
 // incoming image line-webhook stashed for this request (deleting it in the
 // same call since it is single-use), PutGenerated stashes a generated image
@@ -74,18 +98,21 @@ const generatedImageTTL = time.Hour
 // difficulty router) with conversation context and publishes the answer as a
 // reply event.
 type Consumer struct {
-	store    store.Store
-	ai       Responder
-	images   ImageStore
-	nc       *nats.Conn
-	debounce *Debouncer
+	store     store.Store
+	ai        Responder
+	images    ImageStore
+	nc        *nats.Conn
+	debounce  *Debouncer
+	extractor extract.Extractor
+	flows     FlowChecker
 }
 
 // New creates the consumer. debounceWindow > 0 buffers each user's burst of
 // chat messages until they've been quiet that long (capped at maxWait) and
 // answers them as one merged request; 0 answers every message individually.
-func New(s store.Store, p Responder, images ImageStore, nc *nats.Conn, debounceWindow, debounceMaxWait time.Duration) *Consumer {
-	c := &Consumer{store: s, ai: p, images: images, nc: nc}
+// extractor and flows serve the reminder handoff; both may be nil.
+func New(s store.Store, p Responder, images ImageStore, nc *nats.Conn, debounceWindow, debounceMaxWait time.Duration, extractor extract.Extractor, flows FlowChecker) *Consumer {
+	c := &Consumer{store: s, ai: p, images: images, nc: nc, extractor: extractor, flows: flows}
 	if debounceWindow > 0 {
 		c.debounce = NewDebouncer(debounceWindow, debounceMaxWait, c.Handle)
 	}
@@ -101,12 +128,32 @@ func (c *Consumer) Subscribe() (*nats.Subscription, error) {
 			log.Error().Str("subject", RequestSubject).Err(err).Msg("consume: failed to unmarshal event")
 			return
 		}
-		if c.debounce != nil {
+		// Reminder traffic (trigger keyword or mid-flow answer) must not sit
+		// in the debounce buffer: flow steps feel instant, and merging a
+		// burst would corrupt extraction.
+		if c.debounce != nil && !c.isReminderPath(event) {
 			c.debounce.Add(event)
 			return
 		}
 		c.Handle(event)
 	})
+}
+
+// isReminderPath reports whether the event belongs to the reminder pipeline:
+// a trigger keyword, or any text while the user's reminder flow is active.
+func (c *Consumer) isReminderPath(event RequestEvent) bool {
+	if event.ImageKey != "" {
+		return false
+	}
+	if isReminderCommand(event.Text) {
+		return true
+	}
+	if c.flows == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return c.flows.Active(ctx, event.UserID)
 }
 
 // Flush answers any buffered bursts immediately; call before shutdown so
@@ -128,7 +175,18 @@ func (c *Consumer) Handle(event RequestEvent) {
 	ctx, cancel := context.WithTimeout(context.Background(), generateTimeout)
 	defer cancel()
 
-	text, imageKey := c.respond(ctx, event)
+	// Trigger keywords and mid-flow answers skip the chat LLM entirely.
+	if c.isReminderPath(event) {
+		c.handOffReminder(ctx, event)
+		return
+	}
+
+	text, imageKey, reminder := c.respond(ctx, event)
+	if reminder {
+		// The classifier spotted a natural-language reminder ask.
+		c.handOffReminder(ctx, event)
+		return
+	}
 	reply := ReplyEvent{
 		UserID:     event.UserID,
 		ReplyToken: event.ReplyToken,
@@ -164,24 +222,90 @@ func isResetCommand(text string) bool {
 	}
 }
 
+// isReminderCommand reports whether text is a reminder trigger keyword.
+// Must match line-webhook's isReminderRequest and consumer-reminder's
+// isTrigger.
+func isReminderCommand(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return trimmed == "/reminder" ||
+		strings.HasPrefix(trimmed, "/reminder ") ||
+		strings.HasPrefix(trimmed, "ตั้งเตือน")
+}
+
+// stripReminderTrigger removes the trigger keyword, leaving any trailing
+// details for the extractor.
+func stripReminderTrigger(trimmed string) string {
+	rest := strings.TrimPrefix(trimmed, "/reminder")
+	rest = strings.TrimPrefix(rest, "ตั้งเตือน")
+	return strings.TrimSpace(rest)
+}
+
+// bangkok anchors extraction and the published RemindAt to UTC+7. A fixed
+// zone avoids depending on tzdata in the container image.
+var bangkok = time.FixedZone("ICT", 7*60*60)
+
+// handOffReminder runs the extractor over the message and publishes a
+// structured command for consumer-reminder: what to remind, and when
+// (RFC3339, +07:00). Extraction is best-effort - missing fields just make
+// consumer-reminder ask the user.
+func (c *Consumer) handOffReminder(ctx context.Context, event RequestEvent) {
+	trimmed := strings.TrimSpace(event.Text)
+	details := trimmed
+	if isReminderCommand(trimmed) {
+		details = stripReminderTrigger(trimmed)
+	}
+
+	out := ReminderRequestEvent{
+		UserID:     event.UserID,
+		ReplyToken: event.ReplyToken,
+		Text:       event.Text,
+		Timestamp:  event.Timestamp,
+	}
+	if details != "" && c.extractor != nil {
+		result, err := c.extractor.Extract(ctx, details, time.Now().In(bangkok))
+		if err != nil {
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("reminder: extraction failed - handing off raw text")
+		} else {
+			out.Message = result.Message
+			if !result.RemindAt.IsZero() {
+				out.RemindAt = result.RemindAt.In(bangkok).Format(time.RFC3339)
+			}
+			log.Info().Str("user_id", event.UserID).Str("message", out.Message).Str("remind_at", out.RemindAt).Msg("reminder: extracted")
+		}
+	}
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		log.Error().Str("user_id", event.UserID).Err(err).Msg("publish: failed to marshal reminder request")
+		return
+	}
+	if err := c.nc.Publish(ReminderRequestSubject, data); err != nil {
+		log.Error().Str("subject", ReminderRequestSubject).Str("user_id", event.UserID).Err(err).Msg("publish: failed to publish reminder request")
+		return
+	}
+	log.Info().Str("subject", ReminderRequestSubject).Str("user_id", event.UserID).Msg("publish: reminder request handed off")
+}
+
 // respond computes the reply for the event: the text to send and, when the
 // user asked to draw something, the key of the generated image line-webhook
-// serves at /images/<key>.
-func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, string) {
+// serves at /images/<key>. The third result is true when the message is a
+// reminder ask - the caller republishes it to consumer-reminder and nothing
+// is answered or stored here.
+func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, string, bool) {
 	query := strings.TrimSpace(event.Text)
 
 	if event.ImageKey == "" {
 		switch {
 		case query == "":
 			log.Info().Str("user_id", event.UserID).Msg("respond: empty query - sending usage hint")
-			return "Ask me anything after /ai, e.g. \"/ai แนะนำที่เที่ยวในเชียงใหม่\" or \"/ai explain kubernetes\".\nSend \"/ai /reset\" to start a new conversation.", ""
+			return "Ask me anything after /ai, e.g. \"/ai แนะนำที่เที่ยวในเชียงใหม่\" or \"/ai explain kubernetes\".\nSend \"/ai /reset\" to start a new conversation.", "", false
 		case isResetCommand(query):
 			if err := c.store.Clear(ctx, event.UserID); err != nil {
 				log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: failed to clear history")
-				return "Sorry, I couldn't reset the conversation. Please try again.", ""
+				return "Sorry, I couldn't reset the conversation. Please try again.", "", false
 			}
 			log.Info().Str("user_id", event.UserID).Msg("respond: history cleared")
-			return "Conversation history cleared. เริ่มบทสนทนาใหม่ได้เลย!", ""
+			return "Conversation history cleared. เริ่มบทสนทนาใหม่ได้เลย!", "", false
 		}
 	}
 
@@ -190,12 +314,12 @@ func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, str
 	if event.ImageKey != "" {
 		if c.images == nil {
 			log.Error().Str("user_id", event.UserID).Msg("respond: image dropped - no image store configured")
-			return "Sorry, I can't view images right now. Please try again later.", ""
+			return "Sorry, I can't view images right now. Please try again later.", "", false
 		}
 		data, err := c.images.Take(ctx, event.ImageKey)
 		if err != nil {
 			log.Error().Str("user_id", event.UserID).Str("image_key", event.ImageKey).Err(err).Msg("respond: failed to fetch image - it may have expired")
-			return "Sorry, I couldn't retrieve that image in time. Please send it again.", ""
+			return "Sorry, I couldn't retrieve that image in time. Please send it again.", "", false
 		}
 		image = &ai.Image{Data: data, MimeType: event.ImageMime}
 		if query == "" {
@@ -218,9 +342,12 @@ func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, str
 	if err != nil {
 		log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: llm request failed")
 		if image != nil {
-			return "Sorry, I can't view images right now. Please try again later.\nขออภัย ตอนนี้ฉันดูรูปไม่ได้ กรุณาลองใหม่ภายหลัง", ""
+			return "Sorry, I can't view images right now. Please try again later.\nขออภัย ตอนนี้ฉันดูรูปไม่ได้ กรุณาลองใหม่ภายหลัง", "", false
 		}
-		return "Sorry, the AI is unavailable right now. Please try again later.\nขออภัย ตอนนี้ AI ไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง", ""
+		return "Sorry, the AI is unavailable right now. Please try again later.\nขออภัย ตอนนี้ AI ไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง", "", false
+	}
+	if result.ReminderIntent {
+		return "", "", true
 	}
 	log.Info().Str("user_id", event.UserID).Dur("duration", time.Since(start)).Int("answer_chars", len(result.Text)).Bool("image", result.ImageData != nil).Msg("respond: llm answered")
 
@@ -228,7 +355,7 @@ func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, str
 	if result.ImageData != nil {
 		generatedKey, err = c.stashGenerated(ctx, event.UserID, result.ImageData)
 		if err != nil {
-			return "Sorry, I drew your picture but couldn't deliver it. Please try again.\nขออภัย วาดรูปเสร็จแล้วแต่ส่งไม่ได้ ลองใหม่อีกครั้งน้า~", ""
+			return "Sorry, I drew your picture but couldn't deliver it. Please try again.\nขออภัย วาดรูปเสร็จแล้วแต่ส่งไม่ได้ ลองใหม่อีกครั้งน้า~", "", false
 		}
 	}
 
@@ -243,7 +370,7 @@ func (c *Consumer) respond(ctx context.Context, event RequestEvent) (string, str
 		log.Error().Str("user_id", event.UserID).Err(err).Msg("respond: failed to store model reply")
 	}
 	log.Info().Str("user_id", event.UserID).Msg("respond: conversation stored")
-	return answer, generatedKey
+	return answer, generatedKey, false
 }
 
 // stashGenerated puts a generated image into the Redis handoff under a

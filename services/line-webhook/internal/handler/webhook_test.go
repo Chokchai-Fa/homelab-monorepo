@@ -51,6 +51,8 @@ func TestIsAIRequest(t *testing.T) {
 type fakePublisher struct {
 	aiRequests []publisher.AIRequestEvent
 	replies    []publisher.ReplyEvent
+	postbacks  []publisher.PostbackEvent
+	profiles   []publisher.ProfileEvent
 }
 
 func (f *fakePublisher) PublishAIRequest(e publisher.AIRequestEvent) error {
@@ -60,6 +62,16 @@ func (f *fakePublisher) PublishAIRequest(e publisher.AIRequestEvent) error {
 
 func (f *fakePublisher) PublishReply(e publisher.ReplyEvent) error {
 	f.replies = append(f.replies, e)
+	return nil
+}
+
+func (f *fakePublisher) PublishPostback(e publisher.PostbackEvent) error {
+	f.postbacks = append(f.postbacks, e)
+	return nil
+}
+
+func (f *fakePublisher) PublishProfile(e publisher.ProfileEvent) error {
+	f.profiles = append(f.profiles, e)
 	return nil
 }
 
@@ -138,5 +150,72 @@ func TestAISessionFlow(t *testing.T) {
 	}
 	if len(pub.replies) != 3 {
 		t.Fatalf("expected session-start reply, got %+v", pub.replies)
+	}
+}
+
+func TestIsReminderRequest(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"/reminder", true},
+		{"/reminder เตือนพรุ่งนี้ 9 โมง กินยา", true},
+		{"ตั้งเตือน", true},
+		{"ตั้งเตือนกินยาพรุ่งนี้", true},
+		{"/reminders", false},
+		{"เตือนฉันหน่อย", false}, // natural phrasing goes via the LLM classifier
+		{"hello", false},
+	}
+	for _, c := range cases {
+		if got := isReminderRequest(c.text); got != c.want {
+			t.Errorf("isReminderRequest(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}
+
+func TestReminderRouting(t *testing.T) {
+	pub := &fakePublisher{}
+	sessions := &fakeSessions{active: map[string]bool{}}
+	h := &LineHandler{cfg: &Config{AIPrefix: "/ai"}, pub: pub, sessions: sessions}
+
+	// Keyword triggers reach the AI pipeline even without a session (the
+	// intent handoff to consumer-reminder happens in consumer-llm-processor).
+	if err := h.handleTextMessage(textEvent("/reminder เตือนพรุ่งนี้")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.aiRequests) != 1 || pub.aiRequests[0].Text != "/reminder เตือนพรุ่งนี้" {
+		t.Fatalf("keyword not forwarded to AI pipeline: %+v", pub.aiRequests)
+	}
+	if sessions.active["u1"] {
+		t.Fatal("reminder keyword must not start the AI session")
+	}
+
+	// Outside a session, non-keyword text still falls back to echo.
+	if err := h.handleTextMessage(textEvent("plain text")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.aiRequests) != 1 {
+		t.Fatalf("non-keyword text leaked to the AI: %+v", pub.aiRequests)
+	}
+}
+
+func TestPostbackForwarding(t *testing.T) {
+	pub := &fakePublisher{}
+	h := &LineHandler{cfg: &Config{AIPrefix: "/ai"}, pub: pub}
+
+	event := &linebot.Event{
+		ReplyToken: "token",
+		Timestamp:  time.Now(),
+		Source:     &linebot.EventSource{UserID: "u1"},
+		Postback:   &linebot.Postback{Data: "flow=rem&a=target&v=self"},
+	}
+	if err := h.handlePostbackEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.postbacks) != 1 || pub.postbacks[0].Data != "flow=rem&a=target&v=self" {
+		t.Fatalf("postback not forwarded raw: %+v", pub.postbacks)
+	}
+	if len(pub.replies) != 0 {
+		t.Fatalf("postback must not reply directly: %+v", pub.replies)
 	}
 }
