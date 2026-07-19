@@ -130,21 +130,47 @@ func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
 	return messages
 }
 
+// maxMessageChars is LINE's per-text-message length limit. Paragraphs are
+// packed together up to this size so a long answer still fits within
+// maxMessagesPerCall messages and never needs the (quota-limited) push
+// fallback in Handle.
+const maxMessageChars = 5000
+
 func splitReplyMessages(text string) []string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil
 	}
 
-	parts := strings.Split(trimmed, "\n\n")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
+	var result []string
+	var current strings.Builder
+	flush := func() {
+		if current.Len() > 0 {
+			result = append(result, current.String())
+			current.Reset()
+		}
+	}
+
+	for _, part := range strings.Split(trimmed, "\n\n") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		result = append(result, part)
+		for len(part) > maxMessageChars {
+			flush()
+			result = append(result, part[:maxMessageChars])
+			part = part[maxMessageChars:]
+		}
+		if current.Len() > 0 && current.Len()+len("\n\n")+len(part) > maxMessageChars {
+			flush()
+		}
+		if current.Len() > 0 {
+			current.WriteString("\n\n")
+		}
+		current.WriteString(part)
 	}
+	flush()
+
 	if len(result) == 0 {
 		return []string{trimmed}
 	}

@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
@@ -62,14 +63,24 @@ func TestSplitReplyMessages(t *testing.T) {
 			want: []string{"hello there"},
 		},
 		{
-			name: "split on blank lines",
+			name: "merges short paragraphs into one message",
 			text: "first part\n\nsecond part\n\nthird part",
-			want: []string{"first part", "second part", "third part"},
+			want: []string{"first part\n\nsecond part\n\nthird part"},
 		},
 		{
 			name: "ignore empty segments",
 			text: "\n\nfirst part\n\n\nsecond part\n\n",
-			want: []string{"first part", "second part"},
+			want: []string{"first part\n\nsecond part"},
+		},
+		{
+			name: "splits once packed paragraphs exceed the per-message limit",
+			text: strings.Repeat("a", maxMessageChars) + "\n\n" + strings.Repeat("b", maxMessageChars),
+			want: []string{strings.Repeat("a", maxMessageChars), strings.Repeat("b", maxMessageChars)},
+		},
+		{
+			name: "splits a single paragraph longer than the per-message limit",
+			text: strings.Repeat("a", maxMessageChars+10),
+			want: []string{strings.Repeat("a", maxMessageChars), strings.Repeat("a", 10)},
 		},
 	}
 
