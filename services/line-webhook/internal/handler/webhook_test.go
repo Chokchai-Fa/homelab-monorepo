@@ -75,7 +75,10 @@ func (f *fakePublisher) PublishProfile(e publisher.ProfileEvent) error {
 	return nil
 }
 
-type fakeSessions struct{ active map[string]bool }
+type fakeSessions struct {
+	active map[string]bool
+	flows  map[string]bool
+}
 
 func (f *fakeSessions) Start(_ context.Context, userID string) error {
 	f.active[userID] = true
@@ -86,6 +89,7 @@ func (f *fakeSessions) End(_ context.Context, userID string) error {
 	delete(f.active, userID)
 	return nil
 }
+func (f *fakeSessions) FlowActive(_ context.Context, userID string) bool { return f.flows[userID] }
 
 func textEvent(text string) (*linebot.Event, *linebot.TextMessage) {
 	return &linebot.Event{
@@ -97,7 +101,7 @@ func textEvent(text string) (*linebot.Event, *linebot.TextMessage) {
 
 func TestAISessionFlow(t *testing.T) {
 	pub := &fakePublisher{}
-	sessions := &fakeSessions{active: map[string]bool{}}
+	sessions := &fakeSessions{active: map[string]bool{}, flows: map[string]bool{}}
 	h := &LineHandler{cfg: &Config{AIPrefix: "/ai"}, pub: pub, sessions: sessions}
 
 	// 1. "/ai <question>" starts the session and forwards the question.
@@ -175,7 +179,7 @@ func TestIsReminderRequest(t *testing.T) {
 
 func TestReminderRouting(t *testing.T) {
 	pub := &fakePublisher{}
-	sessions := &fakeSessions{active: map[string]bool{}}
+	sessions := &fakeSessions{active: map[string]bool{}, flows: map[string]bool{}}
 	h := &LineHandler{cfg: &Config{AIPrefix: "/ai"}, pub: pub, sessions: sessions}
 
 	// Keyword triggers reach the AI pipeline even without a session (the
@@ -196,6 +200,28 @@ func TestReminderRouting(t *testing.T) {
 	}
 	if len(pub.aiRequests) != 1 {
 		t.Fatalf("non-keyword text leaked to the AI: %+v", pub.aiRequests)
+	}
+
+	// While consumer-reminder's flow is open, free text routes to the AI
+	// pipeline without starting an AI session...
+	sessions.flows["u1"] = true
+	if err := h.handleTextMessage(textEvent("พรุ่งนี้ 9 โมง กินยา")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.aiRequests) != 2 || pub.aiRequests[1].Text != "พรุ่งนี้ 9 โมง กินยา" {
+		t.Fatalf("mid-flow text not forwarded: %+v", pub.aiRequests)
+	}
+	if sessions.active["u1"] {
+		t.Fatal("mid-flow routing must not start the AI session")
+	}
+
+	// ...and once the flow ends, routing stops with it.
+	delete(sessions.flows, "u1")
+	if err := h.handleTextMessage(textEvent("plain again")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pub.aiRequests) != 2 {
+		t.Fatalf("text after flow end leaked to the AI: %+v", pub.aiRequests)
 	}
 }
 

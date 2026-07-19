@@ -32,13 +32,26 @@ const requestTimeout = 10 * time.Second
 
 func instruction(now time.Time) string {
 	return fmt.Sprintf(`You extract reminder details from a chat message (Thai or English).
-Current date-time: %s (%s).
+Current date-time: %s (%s), timezone Asia/Bangkok (UTC+07:00).
 Reply with ONLY a JSON object, no markdown, no explanation:
-{"message": "<what to remind, in the user's own words, or null>",
+{"message": "<what to remind, or null>",
  "remind_at": "<ISO 8601 with +07:00 offset, or null if no time found>"}
-Resolve relative times against the current date-time ("พรุ่งนี้ 9 โมง" = tomorrow 09:00,
-"ตอนเย็น" = 18:00, "9 โมง" with no meridiem = 09:00). If the time already passed today
-and no date was given, assume tomorrow.`,
+Rules for "message":
+- Keep the user's own words for WHAT to remind, with the date/time phrases removed.
+- If the reminder text spans multiple lines, keep EVERY line verbatim (escape line
+  breaks as \n inside the JSON string). Never summarize, shorten or translate it.
+Rules for "remind_at":
+- Always Bangkok wall-clock time with the +07:00 offset. Never use Z, UTC or any other offset.
+- Dates are day/month/year. The year may be Christian Era or Buddhist Era; both mean the
+  same date: "20/09/2026" = "20/09/2569" = 2026-09-20. A year >= 2400 is Buddhist Era,
+  subtract 543. An explicit marker wins: "พ.ศ." = Buddhist Era, "ค.ศ." = Christian Era.
+- A dot in a clock time means a colon, 24-hour clock: "เวลา 00.25" = 00:25, "18.30 น." = 18:30.
+- Thai clock words: "9 โมง"/"9 โมงเช้า" = 09:00, "บ่าย 3" = 15:00, "3 ทุ่ม" = 21:00,
+  "ตี 2" = 02:00, "เที่ยง" = 12:00, "เที่ยงคืน" = 00:00, "ตอนเย็น" = 18:00, "ครึ่ง" adds 30 minutes.
+- Resolve relative dates ("พรุ่งนี้", "มะรืนนี้", weekday names) against the current date-time above.
+- If only a time is given and it already passed today, use tomorrow. This includes
+  just-after-midnight times: at 23:50, "เตือนตอน 00.25" means tomorrow 00:25.
+- If an explicit date is given, keep that date even if the time of day already passed.`,
 		now.Format(time.RFC3339), now.Weekday())
 }
 
@@ -69,13 +82,35 @@ func parse(raw string) (Result, error) {
 		result.Message = strings.TrimSpace(*payload.Message)
 	}
 	if payload.RemindAt != nil && strings.TrimSpace(*payload.RemindAt) != "" {
-		at, err := time.Parse(time.RFC3339, strings.TrimSpace(*payload.RemindAt))
+		at, err := parseTimestamp(strings.TrimSpace(*payload.RemindAt))
 		if err != nil {
 			return Result{}, fmt.Errorf("parse remind_at %q: %w", *payload.RemindAt, err)
 		}
 		result.RemindAt = at
 	}
 	return result, nil
+}
+
+// parseTimestamp is forgiving about the two ways models get the timestamp
+// format wrong: a missing offset and a UTC "Z". The instruction only ever
+// talks about Bangkok wall-clock time, so both are reinterpreted as +07:00
+// rather than shifting the user's intended clock time by seven hours.
+func parseTimestamp(s string) (time.Time, error) {
+	if at, err := time.Parse(time.RFC3339, s); err == nil {
+		if _, offset := at.Zone(); offset == 0 {
+			return time.Date(at.Year(), at.Month(), at.Day(), at.Hour(), at.Minute(), at.Second(), 0, bangkok), nil
+		}
+		return at, nil
+	}
+	var lastErr error
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		at, err := time.ParseInLocation(layout, s, bangkok)
+		if err == nil {
+			return at, nil
+		}
+		lastErr = err
+	}
+	return time.Time{}, lastErr
 }
 
 // Groq calls Groq's OpenAI-compatible chat completions endpoint.

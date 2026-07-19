@@ -149,12 +149,17 @@ func (h *LineHandler) handleTextMessage(event *linebot.Event, message *linebot.T
 	}
 	// Reminder trigger keywords reach the AI pipeline even outside an AI
 	// session: consumer-llm-processor detects the intent, extracts the
-	// details and hands off to consumer-reminder. The session is NOT started
-	// here; consumer-reminder keeps it alive while its flow runs (which is
-	// also what keeps mid-flow free text flowing through this branch or the
-	// session branch below).
+	// details and hands off to consumer-reminder. No AI session is started.
 	if isReminderRequest(trimmed) {
 		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: reminder keyword - forwarding to AI pipeline")
+		return h.publishAIRequest(event, trimmed)
+	}
+	// Mid-flow answers (free text while consumer-reminder's conversation is
+	// open) also go to the AI pipeline. The flow key is owned and expired by
+	// consumer-reminder, so this routing dies with the flow and never leaves
+	// the user in AI mode afterwards.
+	if h.sessions != nil && event.Source.UserID != "" && h.sessions.FlowActive(context.Background(), event.Source.UserID) {
+		log.Info().Str("user_id", event.Source.UserID).Msg("webhook: reminder flow active - routing message to AI pipeline")
 		return h.publishAIRequest(event, trimmed)
 	}
 	if h.sessions != nil && event.Source.UserID != "" && h.sessions.Active(context.Background(), event.Source.UserID) {

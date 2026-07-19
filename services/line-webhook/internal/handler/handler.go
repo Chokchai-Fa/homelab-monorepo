@@ -39,11 +39,15 @@ type Config struct {
 }
 
 // SessionStore tracks which users are in an active AI session; nil disables
-// session mode (only the explicit prefix routes to the AI).
+// session mode (only the explicit prefix routes to the AI). FlowActive
+// reports a reminder conversation in progress (state owned by
+// consumer-reminder), which routes free text to the AI pipeline without
+// opening an AI session.
 type SessionStore interface {
 	Start(ctx context.Context, userID string) error
 	Active(ctx context.Context, userID string) bool
 	End(ctx context.Context, userID string) error
+	FlowActive(ctx context.Context, userID string) bool
 }
 
 // ImageStore stashes downloaded image bytes for consumer-llm-processor to

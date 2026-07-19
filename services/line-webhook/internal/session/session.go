@@ -47,3 +47,20 @@ func (s *Store) Active(ctx context.Context, userID string) bool {
 func (s *Store) End(ctx context.Context, userID string) error {
 	return s.redis.Del(ctx, key(userID)).Err()
 }
+
+func flowKey(userID string) string {
+	return fmt.Sprintf("chat:reminder_flow:%s", userID)
+}
+
+// FlowActive reports whether consumer-reminder has a reminder conversation
+// in progress for the user (state it writes under the shared Redis key).
+// Mid-flow free text must keep reaching the AI pipeline without opening an
+// AI session. Redis errors degrade to "no flow".
+func (s *Store) FlowActive(ctx context.Context, userID string) bool {
+	n, err := s.redis.Exists(ctx, flowKey(userID)).Result()
+	if err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("session: reminder flow check failed - treating as inactive")
+		return false
+	}
+	return n > 0
+}

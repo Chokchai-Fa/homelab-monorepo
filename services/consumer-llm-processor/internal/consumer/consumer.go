@@ -232,6 +232,17 @@ func isReminderCommand(text string) bool {
 		strings.HasPrefix(trimmed, "ตั้งเตือน")
 }
 
+// isCancelText mirrors consumer-reminder's isCancelText: a typed cancel
+// ends the flow over there, so don't burn an extraction call on it here.
+func isCancelText(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "ยกเลิก", "cancel", "/cancel":
+		return true
+	default:
+		return false
+	}
+}
+
 // stripReminderTrigger removes the trigger keyword, leaving any trailing
 // details for the extractor.
 func stripReminderTrigger(trimmed string) string {
@@ -261,17 +272,20 @@ func (c *Consumer) handOffReminder(ctx context.Context, event RequestEvent) {
 		Text:       event.Text,
 		Timestamp:  event.Timestamp,
 	}
-	if details != "" && c.extractor != nil {
-		result, err := c.extractor.Extract(ctx, details, time.Now().In(bangkok))
+	if details != "" && c.extractor != nil && !isCancelText(details) {
+		now := time.Now().In(bangkok)
+		result, err := c.extractor.Extract(ctx, details, now)
 		if err != nil {
-			log.Error().Str("user_id", event.UserID).Err(err).Msg("reminder: extraction failed - handing off raw text")
-		} else {
-			out.Message = result.Message
-			if !result.RemindAt.IsZero() {
-				out.RemindAt = result.RemindAt.In(bangkok).Format(time.RFC3339)
-			}
-			log.Info().Str("user_id", event.UserID).Str("message", out.Message).Str("remind_at", out.RemindAt).Msg("reminder: extracted")
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("reminder: extraction failed - deterministic time parsing only")
+			result = extract.Result{}
 		}
+		out.Message = result.Message
+		// Explicit numeric dates/clock times in the text override the LLM
+		// (and cover for it entirely when the call failed).
+		if at := extract.Refine(details, result.RemindAt, now); !at.IsZero() {
+			out.RemindAt = at.In(bangkok).Format(time.RFC3339)
+		}
+		log.Info().Str("user_id", event.UserID).Str("message", out.Message).Str("remind_at", out.RemindAt).Msg("reminder: extracted")
 	}
 
 	data, err := json.Marshal(out)

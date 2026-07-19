@@ -55,6 +55,18 @@ func isTrigger(trimmed string) bool {
 		strings.HasPrefix(trimmed, "ตั้งเตือน")
 }
 
+// isCancelText reports whether the user typed a cancel instead of pressing
+// the cancel button; both must work at every step. Must match
+// consumer-llm-processor's isCancelText.
+func isCancelText(trimmed string) bool {
+	switch strings.ToLower(trimmed) {
+	case "ยกเลิก", "cancel", "/cancel":
+		return true
+	default:
+		return false
+	}
+}
+
 // stripTrigger removes the trigger keyword, leaving any trailing details
 // ("/reminder เตือนพรุ่งนี้ 9 โมง กินยา" -> "เตือนพรุ่งนี้ 9 โมง กินยา").
 func stripTrigger(trimmed string) string {
@@ -71,6 +83,12 @@ func (f *Flow) HandleRequest(ctx context.Context, ev events.ReminderRequestEvent
 	if err != nil {
 		log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: state load failed")
 		f.reply(ev.UserID, ev.ReplyToken, "ขอโทษน้า ระบบเตือนความจำขัดข้อง ลองใหม่อีกครั้งนะ", nil)
+		return
+	}
+
+	// Typed cancel ends the flow just like the cancel button.
+	if state != nil && isCancelText(text) {
+		f.cancel(ctx, ev.UserID, ev.ReplyToken)
 		return
 	}
 
@@ -140,12 +158,7 @@ func (f *Flow) HandlePostback(ctx context.Context, ev events.PostbackEvent) {
 		return
 	}
 	if action == "cancel" {
-		if state != nil {
-			if err := f.state.Delete(ctx, ev.UserID); err != nil {
-				log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: state delete failed")
-			}
-		}
-		f.reply(ev.UserID, ev.ReplyToken, "ยกเลิกแล้วน้า", nil)
+		f.cancel(ctx, ev.UserID, ev.ReplyToken)
 		return
 	}
 	if state == nil {
@@ -267,7 +280,7 @@ func (f *Flow) askConfirm(ctx context.Context, userID, replyToken string, state 
 			target = "เพื่อน"
 		}
 	}
-	preview := fmt.Sprintf("ตั้งเตือน %s: \"%s\"\nเวลา %s\nยืนยันไหม?",
+	preview := fmt.Sprintf("ตั้งเตือน %s: \"%s\"\n%s\nยืนยันไหม?",
 		target, state.Message, formatBangkok(state.RemindAt))
 	f.reply(userID, replyToken, preview, []events.QuickReply{
 		{Label: "ยืนยัน", Data: "flow=rem&a=confirm", DisplayText: "ยืนยัน"},
@@ -291,8 +304,16 @@ func (f *Flow) handleConfirm(ctx context.Context, ev events.PostbackEvent, state
 		log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: state delete failed")
 	}
 	log.Info().Str("user_id", ev.UserID).Int64("reminder_id", id).Time("remind_at", state.RemindAt).Msg("flow: reminder saved")
-	f.reply(ev.UserID, ev.ReplyToken, fmt.Sprintf("บันทึกแล้ว ⏰ จะเตือน \"%s\" เวลา %s น้า",
+	f.reply(ev.UserID, ev.ReplyToken, fmt.Sprintf("บันทึกแล้ว ⏰ จะเตือน \"%s\" %s น้า",
 		state.Message, formatBangkok(state.RemindAt)), nil)
+}
+
+// cancel ends the flow (button or typed) and acknowledges it.
+func (f *Flow) cancel(ctx context.Context, userID, replyToken string) {
+	if err := f.state.Delete(ctx, userID); err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("flow: state delete failed")
+	}
+	f.reply(userID, replyToken, "ยกเลิกแล้วน้า", nil)
 }
 
 // promptForStep re-sends the prompt for whatever step the flow is stuck on.
@@ -351,7 +372,7 @@ func (f *Flow) reply(userID, replyToken, text string, quickReplies []events.Quic
 }
 
 func formatBangkok(t time.Time) string {
-	return t.In(bangkok).Format("02/01/2006 15:04")
+	return t.In(bangkok).Format("วันที่ 02/01/2006 เวลา 15:04 น.")
 }
 
 func truncateLabel(s string) string {

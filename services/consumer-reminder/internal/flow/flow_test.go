@@ -109,10 +109,14 @@ func TestFullFlowForSelf(t *testing.T) {
 	if len(reply.QuickReplies) != 3 {
 		t.Fatalf("target prompt buttons = %+v", reply.QuickReplies)
 	}
-	// The flow key must exist so line-webhook routes free text here, and the
-	// AI session key must be set so the webhook forwards it at all.
-	if !h.redis.Exists("chat:reminder_flow:u1") || !h.redis.Exists("chat:ai_session:u1") {
-		t.Fatal("flow/session keys not set on start")
+	// The flow key must exist so line-webhook routes free text here - and
+	// only the flow key: opening an AI session would leave the user stuck in
+	// AI mode after the flow ends.
+	if !h.redis.Exists("chat:reminder_flow:u1") {
+		t.Fatal("flow key not set on start")
+	}
+	if h.redis.Exists("chat:ai_session:u1") {
+		t.Fatal("reminder flow must not open an AI session")
 	}
 
 	// 2. Pick "myself" - no details yet, so the flow asks for them.
@@ -208,6 +212,41 @@ func TestCancelMidFlow(t *testing.T) {
 	}
 	if !strings.Contains(h.lastReply(t).Text, "ยกเลิก") {
 		t.Fatalf("expected cancel ack, got %q", h.lastReply(t).Text)
+	}
+}
+
+func TestTypedCancelMidFlow(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.flow.HandleRequest(ctx, request("/reminder"))
+	h.flow.HandlePostback(ctx, postback("flow=rem&a=target&v=self"))
+
+	// Typing "ยกเลิก" must cancel, not become the reminder message.
+	h.flow.HandleRequest(ctx, request("ยกเลิก"))
+	if h.redis.Exists("chat:reminder_flow:u1") {
+		t.Fatal("flow key survived typed cancel")
+	}
+	if !strings.Contains(h.lastReply(t).Text, "ยกเลิก") {
+		t.Fatalf("expected cancel ack, got %q", h.lastReply(t).Text)
+	}
+	if len(h.store.reminders) != 0 {
+		t.Fatalf("no reminder should be saved after cancel: %+v", h.store.reminders)
+	}
+}
+
+func TestMultilineMessageSurvives(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	remindAt := h.now.Add(2 * time.Hour)
+	message := "ซื้อของเข้าบ้าน:\n- นม\n- ไข่\n- ข้าวสาร"
+
+	h.flow.HandleRequest(ctx, request("/reminder"))
+	h.flow.HandlePostback(ctx, postback("flow=rem&a=target&v=self"))
+	h.flow.HandleRequest(ctx, extracted(message+" พรุ่งนี้ 9 โมง", message, remindAt))
+	h.flow.HandlePostback(ctx, postback("flow=rem&a=confirm"))
+
+	if len(h.store.reminders) != 1 || h.store.reminders[0].message != message {
+		t.Fatalf("multi-line message mangled: %+v", h.store.reminders)
 	}
 }
 

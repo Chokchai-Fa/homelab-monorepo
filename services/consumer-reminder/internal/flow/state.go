@@ -27,9 +27,10 @@ type State struct {
 	RemindAt     time.Time `json:"remind_at,omitempty"`
 }
 
-// StateStore persists flow state. Every write also refreshes the shared AI
-// session key so line-webhook keeps forwarding the user's free text while
-// the flow is alive (both keys share the same TTL and can't desync).
+// StateStore persists flow state. line-webhook and consumer-llm-processor
+// both check the flow key's existence to route the user's free text here
+// while the flow is alive; the AI session key is never touched, so finishing
+// a reminder cannot leave the user stuck in AI mode.
 type StateStore struct {
 	redis *redis.Client
 	ttl   time.Duration
@@ -39,8 +40,7 @@ func NewStateStore(rdb *redis.Client, ttl time.Duration) *StateStore {
 	return &StateStore{redis: rdb, ttl: ttl}
 }
 
-func stateKey(userID string) string   { return fmt.Sprintf("chat:reminder_flow:%s", userID) }
-func sessionKey(userID string) string { return fmt.Sprintf("chat:ai_session:%s", userID) }
+func stateKey(userID string) string { return fmt.Sprintf("chat:reminder_flow:%s", userID) }
 
 // Get returns the user's flow state, or nil if none.
 func (s *StateStore) Get(ctx context.Context, userID string) (*State, error) {
@@ -58,20 +58,17 @@ func (s *StateStore) Get(ctx context.Context, userID string) (*State, error) {
 	return &state, nil
 }
 
-// Put saves the state and slides both the flow and AI-session TTLs forward.
+// Put saves the state and slides the flow TTL forward.
 func (s *StateStore) Put(ctx context.Context, userID string, state *State) error {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	if err := s.redis.Set(ctx, stateKey(userID), data, s.ttl).Err(); err != nil {
-		return err
-	}
-	return s.redis.Set(ctx, sessionKey(userID), "1", s.ttl).Err()
+	return s.redis.Set(ctx, stateKey(userID), data, s.ttl).Err()
 }
 
-// Delete ends the flow. The AI session key is left alone: if the user was
-// mid /ai conversation before starting the reminder, that continues.
+// Delete ends the flow. Any AI session the user had before starting the
+// reminder is untouched and continues.
 func (s *StateStore) Delete(ctx context.Context, userID string) error {
 	return s.redis.Del(ctx, stateKey(userID)).Err()
 }
