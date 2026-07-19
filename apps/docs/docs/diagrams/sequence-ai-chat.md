@@ -28,7 +28,7 @@ sequenceDiagram
   W->>W: verify X-Line-Signature
   W->>RD: SET chat:ai_session:<uid> (10m)
   W->>N: publish line.chat.ai_request
-  Note over W,L: webhook returns 200 immediately;<br/>it never replies to LINE itself
+  Note over W,L: webhook returns 200 immediately;\nit never replies to LINE itself
 
   N->>P: deliver ai_request (queue group)
   P->>P: debounce burst (≤5s window)
