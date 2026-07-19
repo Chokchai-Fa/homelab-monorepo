@@ -2,7 +2,7 @@
 // wire-compatible with consumer-reply-line-user.
 package events
 
-import "encoding/json"
+import "time"
 
 const (
 	// ReplySubject is consumed by consumer-reply-line-user.
@@ -11,13 +11,21 @@ const (
 	DeliverySubject = "line.chat.delivery"
 )
 
+// ReminderPayload carries the raw facts a fired reminder needs; building the
+// flex bubble is consumer-reply-line-user's job, not this service's - it only
+// orchestrates claiming and firing.
+type ReminderPayload struct {
+	Message            string    `json:"message"`
+	CreatorDisplayName string    `json:"creator_display_name,omitempty"`
+	RemindAt           time.Time `json:"remind_at"`
+}
+
 type ReplyEvent struct {
-	UserID     string          `json:"user_id"`
-	ReplyToken string          `json:"reply_token"`
-	Text       string          `json:"text"`
-	Flex       json.RawMessage `json:"flex,omitempty"`
-	AltText    string          `json:"alt_text,omitempty"`
-	ReminderID int64           `json:"reminder_id,omitempty"`
+	UserID     string           `json:"user_id"`
+	ReplyToken string           `json:"reply_token"`
+	Text       string           `json:"text"`
+	ReminderID int64            `json:"reminder_id,omitempty"`
+	Reminder   *ReminderPayload `json:"reminder,omitempty"`
 }
 
 // DeliveryEvent reports the outcome of delivering a reminder reply.

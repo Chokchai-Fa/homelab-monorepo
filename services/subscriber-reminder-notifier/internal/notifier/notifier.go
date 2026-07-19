@@ -1,8 +1,9 @@
-// Package notifier turns Redis key-expiry events into LINE flex message
-// reminders: it claims the reminder in Postgres, builds the flex bubble, and
-// publishes a ReplyEvent for consumer-reply-line-user to deliver. It also
-// consumes the delivery ack that service publishes back, to record whether
-// the push actually landed (including 429 quota exhaustion).
+// Package notifier turns Redis key-expiry events into fired reminders: it
+// claims the reminder in Postgres and publishes a ReplyEvent carrying the raw
+// reminder facts for consumer-reply-line-user to render and deliver (the flex
+// bubble template lives there, not here). It also consumes the delivery ack
+// that service publishes back, to record whether the push actually landed
+// (including 429 quota exhaustion).
 package notifier
 
 import (
@@ -17,7 +18,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"subscriber-reminder-notifier/internal/events"
-	"subscriber-reminder-notifier/internal/flex"
 	"subscriber-reminder-notifier/internal/store"
 )
 
@@ -120,19 +120,14 @@ func (n *Notifier) handleExpired(key string) {
 		log.Error().Int64("reminder_id", id).Err(err).Msg("notifier: display name lookup failed - using fallback")
 	}
 
-	bubble, err := flex.Build(reminder.Message, displayName, reminder.RemindAt)
-	if err != nil {
-		log.Error().Int64("reminder_id", id).Err(err).Msg("notifier: flex build failed")
-		n.revertOrFail(ctx, id, "flex_build_failed")
-		return
-	}
-
 	err = n.publish(events.ReplyEvent{
 		UserID:     reminder.TargetUserID,
-		Text:       "⏰ " + reminder.Message,
-		Flex:       bubble,
-		AltText:    "⏰ " + reminder.Message,
 		ReminderID: id,
+		Reminder: &events.ReminderPayload{
+			Message:            reminder.Message,
+			CreatorDisplayName: displayName,
+			RemindAt:           reminder.RemindAt,
+		},
 	})
 	if err != nil {
 		log.Error().Int64("reminder_id", id).Err(err).Msg("notifier: reply publish failed")

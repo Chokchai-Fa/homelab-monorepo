@@ -4,8 +4,6 @@
 // and consumer-reply-line-user's consumer.
 package events
 
-import "encoding/json"
-
 const (
 	// ReminderRequestSubject carries trigger keywords and mid-flow free text
 	// from line-webhook, and LLM-detected reminder intents from
@@ -54,10 +52,8 @@ type QuickReply struct {
 }
 
 type ReplyEvent struct {
-	UserID       string          `json:"user_id"`
-	ReplyToken   string          `json:"reply_token"`
-	Text         string          `json:"text"`
-	Flex         json.RawMessage `json:"flex,omitempty"`
-	AltText      string          `json:"alt_text,omitempty"`
-	QuickReplies []QuickReply    `json:"quick_replies,omitempty"`
+	UserID       string       `json:"user_id"`
+	ReplyToken   string       `json:"reply_token"`
+	Text         string       `json:"text"`
+	QuickReplies []QuickReply `json:"quick_replies,omitempty"`
 }

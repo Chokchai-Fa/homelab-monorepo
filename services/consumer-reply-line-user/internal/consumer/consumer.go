@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
+
+	"consumer-reply-line-user/internal/flex"
 )
 
 // Subject and QueueGroup must match the publisher in
@@ -29,22 +32,32 @@ type QuickReply struct {
 	DisplayText string `json:"display_text,omitempty"`
 }
 
+// ReminderPayload carries the raw facts a fired reminder notification needs.
+// consumer-reply-line-user builds the flex bubble itself (internal/flex) so
+// all LINE-message construction - flex, quick-replies, text splitting - lives
+// in the one service whose job is talking to the LINE API; publishers never
+// ship pre-rendered flex JSON.
+type ReminderPayload struct {
+	Message            string    `json:"message"`
+	CreatorDisplayName string    `json:"creator_display_name,omitempty"`
+	RemindAt           time.Time `json:"remind_at"`
+}
+
 // ReplyEvent is published by line-webhook, consumer-llm-processor,
 // consumer-reminder and subscriber-reminder-notifier.
 // ImageKey names a generated image that line-webhook serves publicly at
 // /images/<key>; it becomes a LINE image message ahead of any text.
-// Flex is a flex bubble/carousel container JSON sent ahead of everything
-// else. ReminderID, when non-zero, makes this consumer publish a
-// DeliveryEvent ack after the send attempt.
+// Reminder, when set, renders as a flex bubble ahead of everything else.
+// ReminderID, when non-zero, makes this consumer publish a DeliveryEvent ack
+// after the send attempt.
 type ReplyEvent struct {
-	UserID       string          `json:"user_id"`
-	ReplyToken   string          `json:"reply_token"`
-	Text         string          `json:"text"`
-	ImageKey     string          `json:"image_key,omitempty"`
-	Flex         json.RawMessage `json:"flex,omitempty"`
-	AltText      string          `json:"alt_text,omitempty"`
-	QuickReplies []QuickReply    `json:"quick_replies,omitempty"`
-	ReminderID   int64           `json:"reminder_id,omitempty"`
+	UserID       string           `json:"user_id"`
+	ReplyToken   string           `json:"reply_token"`
+	Text         string           `json:"text"`
+	ImageKey     string           `json:"image_key,omitempty"`
+	QuickReplies []QuickReply     `json:"quick_replies,omitempty"`
+	ReminderID   int64            `json:"reminder_id,omitempty"`
+	Reminder     *ReminderPayload `json:"reminder,omitempty"`
 }
 
 // DeliveryEvent reports the outcome of delivering a reminder reply.
@@ -97,12 +110,12 @@ func (c *Consumer) Handle(event ReplyEvent) {
 		log.Error().Str("subject", Subject).Msg("consume: dropping event without user_id or reply_token")
 		return
 	}
-	if event.Text == "" && event.ImageKey == "" && len(event.Flex) == 0 {
+	if event.Text == "" && event.ImageKey == "" && event.Reminder == nil {
 		log.Error().Str("user_id", event.UserID).Msg("consume: dropping empty reply")
 		c.ackDelivery(event, false, errors.New("empty reply"))
 		return
 	}
-	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Bool("image", event.ImageKey != "").Bool("flex", len(event.Flex) > 0).Msg("consume: reply event received")
+	log.Info().Str("user_id", event.UserID).Int("text_chars", len(event.Text)).Bool("image", event.ImageKey != "").Bool("reminder", event.Reminder != nil).Msg("consume: reply event received")
 
 	messages := c.buildMessages(event)
 	if len(messages) == 0 {
@@ -188,21 +201,20 @@ func (c *Consumer) ackDelivery(event ReplyEvent, ok bool, err error) {
 	log.Info().Int64("reminder_id", event.ReminderID).Bool("ok", ok).Int("error_code", ack.ErrorCode).Msg("ack: delivery reported")
 }
 
-// buildMessages turns a reply event into LINE messages: the flex bubble
-// first, then the generated image (pointing at line-webhook's public /images
-// endpoint), then the text split into chat-sized parts. Quick-reply buttons
-// attach to the last message (LINE only shows them there).
+// buildMessages turns a reply event into LINE messages: a reminder's flex
+// bubble first, then the generated image (pointing at line-webhook's public
+// /images endpoint), then the text split into chat-sized parts. Quick-reply
+// buttons attach to the last message (LINE only shows them there).
 func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
 	var messages []linebot.SendingMessage
-	if len(event.Flex) > 0 {
-		if container, err := linebot.UnmarshalFlexMessageJSON(event.Flex); err == nil {
-			altText := event.AltText
-			if altText == "" {
-				altText = "Reminder"
-			}
-			messages = append(messages, linebot.NewFlexMessage(altText, container))
+	if event.Reminder != nil {
+		if msg, err := reminderFlexMessage(event.Reminder); err == nil {
+			messages = append(messages, msg)
 		} else {
-			log.Error().Str("user_id", event.UserID).Err(err).Msg("build: invalid flex JSON - falling back to text")
+			// json.Marshal of the fixed flex struct is not expected to fail;
+			// this is a last-resort so a reminder is never silently dropped.
+			log.Error().Str("user_id", event.UserID).Err(err).Msg("build: flex build failed - falling back to plain text")
+			messages = append(messages, linebot.NewTextMessage("⏰ "+event.Reminder.Message))
 		}
 	}
 	if event.ImageKey != "" {
@@ -227,6 +239,28 @@ func (c *Consumer) buildMessages(event ReplyEvent) []linebot.SendingMessage {
 		messages[last] = messages[last].WithQuickReplies(linebot.NewQuickReplyItems(buttons...))
 	}
 	return messages
+}
+
+// maxAltTextRunes is LINE's limit on a flex message's alt text (the preview
+// shown in chat lists and notifications).
+const maxAltTextRunes = 400
+
+// reminderFlexMessage renders a ReminderPayload as the flex bubble
+// notification, with an alt text preview built from the reminder message.
+func reminderFlexMessage(r *ReminderPayload) (*linebot.FlexMessage, error) {
+	raw, err := flex.Build(r.Message, r.CreatorDisplayName, r.RemindAt)
+	if err != nil {
+		return nil, err
+	}
+	container, err := linebot.UnmarshalFlexMessageJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	altText := "⏰ " + r.Message
+	if runes := []rune(altText); len(runes) > maxAltTextRunes {
+		altText = string(runes[:maxAltTextRunes-1]) + "…"
+	}
+	return linebot.NewFlexMessage(altText, container), nil
 }
 
 // maxMessageChars is LINE's per-text-message length limit. Paragraphs are

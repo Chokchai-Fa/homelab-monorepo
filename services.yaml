@@ -34,6 +34,22 @@ services:
       - "apps/portfolio-web/**"
       - "build/node-next/**"
 
+  - name: docs
+    image: docs
+    context: apps/docs
+    dockerfile: build/docusaurus/Dockerfile
+    versionFile: apps/docs/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      NODE_VERSION: "20"
+      PORT: "80"
+    # No separate test step: `npm run build` inside the Dockerfile fails the
+    # image build on any broken link (onBrokenLinks: throw) or MDX error.
+    test: ""
+    paths:
+      - "apps/docs/**"
+      - "build/docusaurus/**"
+
   - name: line-webhook
     image: line-webhook
     context: services/line-webhook

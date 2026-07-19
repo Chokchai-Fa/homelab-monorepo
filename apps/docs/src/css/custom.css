@@ -1,0 +1,33 @@
+/**
+ * Minimal brand tweak over the Docusaurus classic theme. A cool indigo primary
+ * to match the reminder flex header (#7D5FFF family), tuned for light + dark.
+ */
+
+:root {
+  --ifm-color-primary: #5b4bd6;
+  --ifm-color-primary-dark: #4a3ac9;
+  --ifm-color-primary-darker: #4636be;
+  --ifm-color-primary-darkest: #3a2d9d;
+  --ifm-color-primary-light: #6d5edb;
+  --ifm-color-primary-lighter: #7869de;
+  --ifm-color-primary-lightest: #948ae6;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #9d92f0;
+  --ifm-color-primary-dark: #7d6fea;
+  --ifm-color-primary-darker: #6d5ee7;
+  --ifm-color-primary-darkest: #4634dc;
+  --ifm-color-primary-light: #bdb5f6;
+  --ifm-color-primary-lighter: #cdc6f9;
+  --ifm-color-primary-lightest: #ffffff;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Give Mermaid diagrams a little breathing room and center them. */
+.docusaurus-mermaid-container {
+  margin: 1.5rem 0;
+  text-align: center;
+}

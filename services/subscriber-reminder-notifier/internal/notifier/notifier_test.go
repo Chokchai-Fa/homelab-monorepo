@@ -81,8 +81,11 @@ func TestHandleExpiredPublishesAndLeavesRowSending(t *testing.T) {
 		t.Fatalf("published = %+v, want 1 event", published)
 	}
 	ev := published[0]
-	if ev.UserID != "target" || ev.ReminderID != 42 || len(ev.Flex) == 0 {
-		t.Errorf("published event = %+v", ev)
+	if ev.UserID != "target" || ev.ReminderID != 42 || ev.Reminder == nil {
+		t.Fatalf("published event = %+v", ev)
+	}
+	if ev.Reminder.Message != "กินยา" || ev.Reminder.CreatorDisplayName != "Meow" {
+		t.Errorf("reminder payload = %+v", ev.Reminder)
 	}
 	if len(fs.reverted) != 0 {
 		t.Errorf("row should stay 'sending' awaiting the ack, but was reverted: %+v", fs.reverted)

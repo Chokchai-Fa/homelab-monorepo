@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/line/line-bot-sdk-go/v7/linebot"
 )
@@ -51,9 +52,11 @@ func TestBuildMessages(t *testing.T) {
 		}
 	})
 
-	t.Run("flex before text", func(t *testing.T) {
-		flex := []byte(`{"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"remind"}]}}`)
-		msgs := c.buildMessages(ReplyEvent{Flex: flex, AltText: "alt", Text: "caption"})
+	t.Run("reminder flex before text", func(t *testing.T) {
+		msgs := c.buildMessages(ReplyEvent{
+			Reminder: &ReminderPayload{Message: "กินยา", RemindAt: time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)},
+			Text:     "caption",
+		})
 		if len(msgs) != 2 {
 			t.Fatalf("got %d messages, want 2", len(msgs))
 		}
@@ -61,26 +64,40 @@ func TestBuildMessages(t *testing.T) {
 		if !ok {
 			t.Fatalf("first message is %T, want *linebot.FlexMessage", msgs[0])
 		}
-		if fm.AltText != "alt" {
-			t.Errorf("alt text = %q, want %q", fm.AltText, "alt")
+		if fm.AltText != "⏰ กินยา" {
+			t.Errorf("alt text = %q, want %q", fm.AltText, "⏰ กินยา")
 		}
 	})
 
-	t.Run("invalid flex falls back to text", func(t *testing.T) {
-		msgs := c.buildMessages(ReplyEvent{Flex: []byte(`{not json`), Text: "fallback"})
+	t.Run("reminder alone with no text", func(t *testing.T) {
+		msgs := c.buildMessages(ReplyEvent{
+			Reminder: &ReminderPayload{Message: "test", RemindAt: time.Now()},
+		})
 		if len(msgs) != 1 {
 			t.Fatalf("got %d messages, want 1", len(msgs))
 		}
-		if txt, ok := msgs[0].(*linebot.TextMessage); !ok || txt.Text != "fallback" {
-			t.Errorf("message = %#v, want text fallback", msgs[0])
+		if _, ok := msgs[0].(*linebot.FlexMessage); !ok {
+			t.Errorf("message = %#v, want flex", msgs[0])
+		}
+	})
+
+	t.Run("alt text truncates to LINE's limit", func(t *testing.T) {
+		msgs := c.buildMessages(ReplyEvent{
+			Reminder: &ReminderPayload{Message: strings.Repeat("a", maxAltTextRunes+50), RemindAt: time.Now()},
+		})
+		fm, ok := msgs[0].(*linebot.FlexMessage)
+		if !ok {
+			t.Fatalf("first message is %T, want *linebot.FlexMessage", msgs[0])
+		}
+		if got := len([]rune(fm.AltText)); got != maxAltTextRunes {
+			t.Errorf("alt text runes = %d, want %d", got, maxAltTextRunes)
 		}
 	})
 
 	t.Run("quick replies attach to last message", func(t *testing.T) {
-		flex := []byte(`{"type":"bubble","body":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"remind"}]}}`)
 		msgs := c.buildMessages(ReplyEvent{
-			Flex: flex,
-			Text: "pick one",
+			Reminder: &ReminderPayload{Message: "remind", RemindAt: time.Now()},
+			Text:     "pick one",
 			QuickReplies: []QuickReply{
 				{Label: "Myself", Data: "flow=rem&a=target&v=self"},
 				{Label: "Cancel", Data: "flow=rem&a=cancel", DisplayText: "cancel"},
