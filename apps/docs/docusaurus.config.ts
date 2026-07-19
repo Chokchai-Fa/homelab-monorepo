@@ -26,7 +26,21 @@ const config: Config = {
       onBrokenMarkdownLinks: 'warn',
     },
   },
-  themes: ['@docusaurus/theme-mermaid'],
+  themes: [
+    '@docusaurus/theme-mermaid',
+    // Offline full-text search (no Algolia account needed): the index is
+    // built at `docusaurus build` time and served as static assets.
+    [
+      '@easyops-cn/docusaurus-search-local',
+      {
+        hashed: true,
+        indexBlog: false,
+        // Docs-only mode serves docs at the site root.
+        docsRouteBasePath: '/',
+        highlightSearchTermsOnTargetPage: true,
+      },
+    ],
+  ],
 
   i18n: {
     defaultLocale: 'en',

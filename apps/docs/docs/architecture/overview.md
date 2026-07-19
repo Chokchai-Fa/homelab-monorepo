@@ -89,7 +89,7 @@ flowchart TB
 Reminders add a time axis: consumer-reminder saves a row, then later
 **worker-reminder-scheduler** and **subscriber-reminder-notifier** fire it —
 covered in the [reminder system](/services/reminder-system) page and the
-[fire sequence](/diagrams/sequence-reminder-fire).
+[fire sequence](/diagrams/sequence-reminder#firing-a-reminder).
 
 ## Design principles
 

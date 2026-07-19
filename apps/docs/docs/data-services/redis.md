@@ -79,7 +79,7 @@ Under memory pressure the `allkeys-lru` policy may **evict** an armed
 `reminder:fire:<id>` key. Eviction fires an `evicted` event, **not** `expired`,
 so a reminder is never fired early. The scheduler's recovery pass catches the
 missed fire and re-arms it — see the [reminder system](/services/reminder-system)
-and the [fire sequence](/diagrams/sequence-reminder-fire).
+and the [fire sequence](/diagrams/sequence-reminder#firing-a-reminder).
 :::
 
 ## Why no persistence?

@@ -44,7 +44,7 @@ flowchart TB
 A reminder is created through a short quick-reply conversation, driven by
 consumer-reminder and rendered by consumer-reply-line-user as LINE quick-reply
 buttons + postbacks. Full detail in the
-[create sequence](/diagrams/sequence-reminder-create).
+[create sequence](/diagrams/sequence-reminder#creating-a-reminder).
 
 ```mermaid
 stateDiagram-v2

@@ -67,5 +67,5 @@ flowchart LR
 :::note
 Reminder **creation** (the quick-reply flow) never hits this — every step there
 is a reply-token response. Only **firing** consumes push. See the
-[fire sequence](/diagrams/sequence-reminder-fire).
+[fire sequence](/diagrams/sequence-reminder#firing-a-reminder).
 :::
