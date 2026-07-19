@@ -80,6 +80,58 @@ sequenceDiagram
   to a user action, so it uses the reply token — no push quota is consumed.
   Firing later is what needs push (below).
 
+## Managing reminders
+
+`/reminders` (or `ดูเตือน`) lists the creator's upcoming reminders; picking
+one offers edit or delete. Both operations lean on the same status-guarded
+claims that make firing race-free.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as LINE user
+  participant W as line-webhook
+  participant N as NATS
+  participant C as consumer-reminder
+  participant DB as Postgres
+  participant RD as Redis
+  participant R as consumer-reply-line-user
+
+  U->>W: "/reminders"
+  W->>N: line.chat.ai_request → (llm-processor forwards, no extraction)
+  N->>C: line.chat.reminder_request
+  C->>DB: SELECT upcoming WHERE creator_id AND status IN (pending, scheduled)
+  C->>RD: SET chat:reminder_flow:<uid> (step=manage, 10m)
+  C->>N: line.chat.reply (list + one pick-button per reminder)
+  N->>R: deliver
+  R->>U: numbered list
+
+  U->>W: taps a reminder (postback a=pick)
+  W->>N: line.chat.postback
+  N->>C: deliver
+  C->>N: line.chat.reply (details + แก้ไข / ลบ / ยกเลิก)
+
+  alt delete (a=rdel)
+    U->>W: taps "ลบ"
+    W->>N: line.chat.postback
+    N->>C: deliver
+    C->>DB: UPDATE → cancelled WHERE creator AND status IN (pending, scheduled)
+    Note over DB,RD: an already-armed reminder:fire:<id> key later expires,<br/>the notifier's claim (WHERE status='scheduled') misses → no fire
+    C->>N: line.chat.reply ("ลบแล้วน้า 🗑️")
+  else edit (a=redit)
+    U->>W: taps "แก้ไข"
+    W->>N: line.chat.postback
+    N->>C: deliver
+    C->>RD: flow (step=await_details, editing_id, message pre-filled)
+    C->>N: line.chat.reply ("พิมพ์เวลาใหม่ หรือข้อความใหม่พร้อมเวลา")
+    U->>W: "มะรืนนี้ 14:00" (free text → extraction as usual)
+    Note over C: confirm preview → user confirms
+    C->>DB: UPDATE message, remind_at, status=pending
+    Note over DB: scheduler re-arms at the new time on its next tick
+    C->>N: line.chat.reply ("แก้ไขแล้ว ⏰")
+  end
+```
+
 ## Firing a reminder
 
 From a `pending` row to a flex-message notification in the user's chat. This

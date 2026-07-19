@@ -222,14 +222,23 @@ func isResetCommand(text string) bool {
 	}
 }
 
-// isReminderCommand reports whether text is a reminder trigger keyword.
-// Must match line-webhook's isReminderRequest and consumer-reminder's
-// isTrigger.
+// isReminderCommand reports whether text is a reminder trigger keyword
+// (create or manage). Must match line-webhook's isReminderRequest and
+// consumer-reminder's isTrigger/isListTrigger.
 func isReminderCommand(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	return trimmed == "/reminder" ||
 		strings.HasPrefix(trimmed, "/reminder ") ||
-		strings.HasPrefix(trimmed, "ตั้งเตือน")
+		strings.HasPrefix(trimmed, "ตั้งเตือน") ||
+		isReminderListCommand(trimmed)
+}
+
+// isReminderListCommand matches the manage-flow keywords; these carry no
+// details to extract, so handOffReminder skips the LLM call for them.
+func isReminderListCommand(trimmed string) bool {
+	return trimmed == "/reminders" ||
+		strings.HasPrefix(trimmed, "ดูเตือน") ||
+		strings.HasPrefix(trimmed, "รายการเตือน")
 }
 
 // isCancelText mirrors consumer-reminder's isCancelText: a typed cancel
@@ -272,7 +281,7 @@ func (c *Consumer) handOffReminder(ctx context.Context, event RequestEvent) {
 		Text:       event.Text,
 		Timestamp:  event.Timestamp,
 	}
-	if details != "" && c.extractor != nil && !isCancelText(details) {
+	if details != "" && c.extractor != nil && !isCancelText(details) && !isReminderListCommand(trimmed) {
 		now := time.Now().In(bangkok)
 		result, err := c.extractor.Extract(ctx, details, now)
 		if err != nil {

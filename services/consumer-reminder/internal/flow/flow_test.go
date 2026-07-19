@@ -2,6 +2,7 @@ package flow
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,48 @@ func (f *fakeStore) CreateReminder(_ context.Context, creator, target, message s
 	f.reminders = append(f.reminders, savedReminder{creator, target, message, remindAt})
 	f.nextID++
 	return f.nextID, nil
+}
+
+func (f *fakeStore) ListUpcoming(_ context.Context, creatorID string, limit int) ([]store.Reminder, error) {
+	var out []store.Reminder
+	for i, r := range f.reminders {
+		if r.creator == creatorID && len(out) < limit {
+			out = append(out, store.Reminder{
+				ID: int64(i + 1), Message: r.message, RemindAt: r.remindAt,
+				TargetUserID: r.target, TargetName: f.names[r.target],
+			})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) GetReminder(_ context.Context, id int64, creatorID string) (*store.Reminder, error) {
+	i := int(id) - 1
+	if i < 0 || i >= len(f.reminders) || f.reminders[i].creator != creatorID {
+		return nil, nil
+	}
+	r := f.reminders[i]
+	return &store.Reminder{ID: id, Message: r.message, RemindAt: r.remindAt,
+		TargetUserID: r.target, TargetName: f.names[r.target]}, nil
+}
+
+func (f *fakeStore) CancelReminder(_ context.Context, id int64, creatorID string) (bool, error) {
+	i := int(id) - 1
+	if i < 0 || i >= len(f.reminders) || f.reminders[i].creator != creatorID {
+		return false, nil
+	}
+	f.reminders = append(f.reminders[:i], f.reminders[i+1:]...)
+	return true, nil
+}
+
+func (f *fakeStore) UpdateReminder(_ context.Context, id int64, creatorID, message string, remindAt time.Time) (bool, error) {
+	i := int(id) - 1
+	if i < 0 || i >= len(f.reminders) || f.reminders[i].creator != creatorID {
+		return false, nil
+	}
+	f.reminders[i].message = message
+	f.reminders[i].remindAt = remindAt
+	return true, nil
 }
 
 type harness struct {
@@ -279,6 +322,100 @@ func TestTriggerRestartsFlow(t *testing.T) {
 	reply := h.lastReply(t)
 	if len(reply.QuickReplies) != 3 || !strings.Contains(reply.Text, "ใคร") {
 		t.Fatalf("expected fresh target prompt, got %+v", reply)
+	}
+}
+
+// seedReminder puts one reminder in the fake store the way the create flow
+// would, returning its id.
+func (h *harness) seedReminder(message string, at time.Time) int64 {
+	h.store.reminders = append(h.store.reminders, savedReminder{"u1", "u1", message, at})
+	return int64(len(h.store.reminders))
+}
+
+func TestListUpcoming(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.seedReminder("กินยา", h.now.Add(2*time.Hour))
+	h.seedReminder("ประชุม", h.now.Add(24*time.Hour))
+
+	h.flow.HandleRequest(ctx, request("/reminders"))
+	reply := h.lastReply(t)
+	if !strings.Contains(reply.Text, "กินยา") || !strings.Contains(reply.Text, "ประชุม") {
+		t.Fatalf("list text = %q", reply.Text)
+	}
+	// One pick button per reminder + cancel.
+	if len(reply.QuickReplies) != 3 {
+		t.Fatalf("list buttons = %+v", reply.QuickReplies)
+	}
+	if !h.redis.Exists("chat:reminder_flow:u1") {
+		t.Fatal("manage flow state not set")
+	}
+}
+
+func TestListEmpty(t *testing.T) {
+	h := newHarness(t)
+	h.flow.HandleRequest(context.Background(), request("ดูเตือน"))
+	if !strings.Contains(h.lastReply(t).Text, "ยังไม่มีรายการ") {
+		t.Fatalf("expected empty-list message, got %q", h.lastReply(t).Text)
+	}
+	if h.redis.Exists("chat:reminder_flow:u1") {
+		t.Fatal("empty list must not leave flow state")
+	}
+}
+
+func TestDeleteReminder(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	id := h.seedReminder("กินยา", h.now.Add(2*time.Hour))
+
+	h.flow.HandleRequest(ctx, request("/reminders"))
+	h.flow.HandlePostback(ctx, postback("flow=rem&a=pick&v=1"))
+	reply := h.lastReply(t)
+	if len(reply.QuickReplies) != 3 || !strings.Contains(reply.Text, "กินยา") {
+		t.Fatalf("pick reply = %+v", reply)
+	}
+
+	h.flow.HandlePostback(ctx, postback(fmt.Sprintf("flow=rem&a=rdel&v=%d", id)))
+	if !strings.Contains(h.lastReply(t).Text, "ลบแล้ว") {
+		t.Fatalf("expected delete ack, got %q", h.lastReply(t).Text)
+	}
+	if len(h.store.reminders) != 0 {
+		t.Fatalf("reminder not deleted: %+v", h.store.reminders)
+	}
+	if h.redis.Exists("chat:reminder_flow:u1") {
+		t.Fatal("flow state survived delete")
+	}
+}
+
+func TestEditReminderTimeOnly(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	id := h.seedReminder("กินยา", h.now.Add(2*time.Hour))
+	newAt := h.now.Add(48 * time.Hour)
+
+	h.flow.HandleRequest(ctx, request("/reminders"))
+	h.flow.HandlePostback(ctx, postback(fmt.Sprintf("flow=rem&a=redit&v=%d", id)))
+	if !strings.Contains(h.lastReply(t).Text, "แก้ไข") {
+		t.Fatalf("expected edit prompt, got %q", h.lastReply(t).Text)
+	}
+
+	// User sends only a new time; the old message must survive.
+	h.flow.HandleRequest(ctx, extracted("มะรืนนี้ 14:00", "", newAt))
+	reply := h.lastReply(t)
+	if !strings.Contains(reply.Text, "กินยา") || len(reply.QuickReplies) != 3 {
+		t.Fatalf("expected confirm preview with old message, got %+v", reply)
+	}
+
+	h.flow.HandlePostback(ctx, postback("flow=rem&a=confirm"))
+	if !strings.Contains(h.lastReply(t).Text, "แก้ไขแล้ว") {
+		t.Fatalf("expected edit ack, got %q", h.lastReply(t).Text)
+	}
+	if len(h.store.reminders) != 1 {
+		t.Fatalf("edit must not create a new reminder: %+v", h.store.reminders)
+	}
+	saved := h.store.reminders[0]
+	if saved.message != "กินยา" || !saved.remindAt.Equal(newAt) {
+		t.Fatalf("edited reminder = %+v", saved)
 	}
 }
 

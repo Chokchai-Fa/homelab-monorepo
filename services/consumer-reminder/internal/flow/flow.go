@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,10 @@ type Store interface {
 	ListUsers(ctx context.Context, exclude string, limit int) ([]store.User, error)
 	GetDisplayName(ctx context.Context, userID string) (string, error)
 	CreateReminder(ctx context.Context, creatorID, targetID, message string, remindAt time.Time) (int64, error)
+	ListUpcoming(ctx context.Context, creatorID string, limit int) ([]store.Reminder, error)
+	GetReminder(ctx context.Context, id int64, creatorID string) (*store.Reminder, error)
+	CancelReminder(ctx context.Context, id int64, creatorID string) (bool, error)
+	UpdateReminder(ctx context.Context, id int64, creatorID, message string, remindAt time.Time) (bool, error)
 }
 
 type Flow struct {
@@ -53,6 +58,15 @@ func isTrigger(trimmed string) bool {
 	return trimmed == "/reminder" ||
 		strings.HasPrefix(trimmed, "/reminder ") ||
 		strings.HasPrefix(trimmed, "ตั้งเตือน")
+}
+
+// isListTrigger opens the manage flow (list / edit / delete). Must match the
+// list keywords in line-webhook's isReminderRequest and
+// consumer-llm-processor's isReminderCommand.
+func isListTrigger(trimmed string) bool {
+	return trimmed == "/reminders" ||
+		strings.HasPrefix(trimmed, "ดูเตือน") ||
+		strings.HasPrefix(trimmed, "รายการเตือน")
 }
 
 // isCancelText reports whether the user typed a cancel instead of pressing
@@ -89,6 +103,12 @@ func (f *Flow) HandleRequest(ctx context.Context, ev events.ReminderRequestEvent
 	// Typed cancel ends the flow just like the cancel button.
 	if state != nil && isCancelText(text) {
 		f.cancel(ctx, ev.UserID, ev.ReplyToken)
+		return
+	}
+
+	// The list keyword opens the manage flow (also mid-flow: it restarts).
+	if isListTrigger(text) {
+		f.startManage(ctx, ev.UserID, ev.ReplyToken)
 		return
 	}
 
@@ -141,6 +161,46 @@ func (f *Flow) start(ctx context.Context, ev events.ReminderRequestEvent, text s
 	})
 }
 
+// startManage lists the user's upcoming reminders with one pick-button per
+// reminder; picking one offers edit / delete.
+func (f *Flow) startManage(ctx context.Context, userID, replyToken string) {
+	rems, err := f.store.ListUpcoming(ctx, userID, maxTargetButtons)
+	if err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("flow: list upcoming failed")
+		f.reply(userID, replyToken, "ขอโทษน้า ดึงรายการเตือนไม่สำเร็จ ลองใหม่อีกครั้งนะ", nil)
+		return
+	}
+	if len(rems) == 0 {
+		// Not a flow: make sure no stale state lingers.
+		if err := f.state.Delete(ctx, userID); err != nil {
+			log.Error().Str("user_id", userID).Err(err).Msg("flow: state delete failed")
+		}
+		f.reply(userID, replyToken, "ยังไม่มีรายการเตือนที่กำลังจะถึงเลยน้า ตั้งใหม่ด้วย /reminder ได้เลย", nil)
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("รายการเตือนที่กำลังจะถึง ⏰\n")
+	buttons := make([]events.QuickReply, 0, len(rems)+1)
+	for i, r := range rems {
+		fmt.Fprintf(&b, "\n%d) %s\n    %s", i+1, r.Message, formatBangkok(r.RemindAt))
+		if r.TargetUserID != userID && r.TargetName != "" {
+			fmt.Fprintf(&b, " (เตือน %s)", r.TargetName)
+		}
+		label := truncateLabel(fmt.Sprintf("%d) %s", i+1, r.Message))
+		buttons = append(buttons, events.QuickReply{
+			Label:       label,
+			Data:        fmt.Sprintf("flow=rem&a=pick&v=%d", r.ID),
+			DisplayText: label,
+		})
+	}
+	b.WriteString("\n\nกดเลือกรายการเพื่อแก้ไขหรือลบได้เลย")
+	buttons = append(buttons, events.QuickReply{Label: "ยกเลิก", Data: "flow=rem&a=cancel", DisplayText: "ยกเลิก"})
+
+	f.save(ctx, userID, replyToken, &State{Step: StepManage})
+	f.reply(userID, replyToken, b.String(), buttons)
+}
+
 // HandlePostback handles quick-reply button presses. Only flow=rem payloads
 // belong to this service; anything else is dropped with a log line.
 func (f *Flow) HandlePostback(ctx context.Context, ev events.PostbackEvent) {
@@ -179,10 +239,101 @@ func (f *Flow) HandlePostback(ctx context.Context, ev events.PostbackEvent) {
 		state.RemindAt = time.Time{}
 		f.save(ctx, ev.UserID, ev.ReplyToken, state)
 		f.reply(ev.UserID, ev.ReplyToken, "โอเค พิมพ์ใหม่ได้เลย จะให้เตือนว่าอะไร เมื่อไหร่?", nil)
+	case "pick":
+		f.handleManagePick(ctx, ev, values.Get("v"))
+	case "redit":
+		f.handleManageEdit(ctx, ev, values.Get("v"))
+	case "rdel":
+		f.handleManageDelete(ctx, ev, values.Get("v"))
 	default:
 		log.Warn().Str("user_id", ev.UserID).Str("action", action).Msg("flow: unknown postback action")
 		f.promptForStep(ctx, ev.UserID, ev.ReplyToken, state)
 	}
+}
+
+// handleManagePick shows one reminder's details with edit/delete buttons.
+func (f *Flow) handleManagePick(ctx context.Context, ev events.PostbackEvent, idStr string) {
+	rem := f.lookupManaged(ctx, ev, idStr)
+	if rem == nil {
+		return
+	}
+	target := ""
+	if rem.TargetUserID != ev.UserID && rem.TargetName != "" {
+		target = fmt.Sprintf("\nเตือนให้: %s", rem.TargetName)
+	}
+	text := fmt.Sprintf("\"%s\"\n%s%s\n\nจะทำอะไรกับรายการนี้ดี?",
+		rem.Message, formatBangkok(rem.RemindAt), target)
+	f.reply(ev.UserID, ev.ReplyToken, text, []events.QuickReply{
+		{Label: "แก้ไข", Data: fmt.Sprintf("flow=rem&a=redit&v=%d", rem.ID), DisplayText: "แก้ไข"},
+		{Label: "ลบ", Data: fmt.Sprintf("flow=rem&a=rdel&v=%d", rem.ID), DisplayText: "ลบ"},
+		{Label: "ยกเลิก", Data: "flow=rem&a=cancel", DisplayText: "ยกเลิก"},
+	})
+}
+
+// handleManageEdit switches into the normal details step, pre-filled with the
+// existing message so the user can change just the time (or type a whole new
+// "what + when"). Confirm then UPDATEs instead of INSERTing.
+func (f *Flow) handleManageEdit(ctx context.Context, ev events.PostbackEvent, idStr string) {
+	rem := f.lookupManaged(ctx, ev, idStr)
+	if rem == nil {
+		return
+	}
+	state := &State{
+		Step:         StepAwaitDetails,
+		TargetUserID: rem.TargetUserID,
+		Message:      rem.Message,
+		EditingID:    rem.ID,
+	}
+	f.save(ctx, ev.UserID, ev.ReplyToken, state)
+	f.reply(ev.UserID, ev.ReplyToken, fmt.Sprintf(
+		"แก้ไข \"%s\" ยังไงดี? พิมพ์เวลาใหม่ หรือพิมพ์ทั้งข้อความใหม่พร้อมเวลาเลยก็ได้ เช่น \"พรุ่งนี้ 9 โมง กินยา\"",
+		rem.Message), nil)
+}
+
+// handleManageDelete cancels the reminder (status guard makes an armed Redis
+// timer fire into nothing).
+func (f *Flow) handleManageDelete(ctx context.Context, ev events.PostbackEvent, idStr string) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		f.reply(ev.UserID, ev.ReplyToken, "ไม่พบรายการนี้แล้วน้า ดูรายการล่าสุดด้วย /reminders ได้เลย", nil)
+		return
+	}
+	ok, err := f.store.CancelReminder(ctx, id, ev.UserID)
+	if err != nil {
+		log.Error().Str("user_id", ev.UserID).Int64("reminder_id", id).Err(err).Msg("flow: cancel reminder failed")
+		f.reply(ev.UserID, ev.ReplyToken, "ขอโทษน้า ลบไม่สำเร็จ ลองใหม่อีกครั้งนะ", nil)
+		return
+	}
+	if !ok {
+		f.reply(ev.UserID, ev.ReplyToken, "ไม่พบรายการนี้แล้วน้า อาจถูกลบหรือส่งไปแล้ว ดูรายการล่าสุดด้วย /reminders ได้เลย", nil)
+		return
+	}
+	if err := f.state.Delete(ctx, ev.UserID); err != nil {
+		log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: state delete failed")
+	}
+	log.Info().Str("user_id", ev.UserID).Int64("reminder_id", id).Msg("flow: reminder deleted")
+	f.reply(ev.UserID, ev.ReplyToken, "ลบแล้วน้า 🗑️", nil)
+}
+
+// lookupManaged parses and loads a managed reminder, replying (and returning
+// nil) when it's gone or never belonged to this user.
+func (f *Flow) lookupManaged(ctx context.Context, ev events.PostbackEvent, idStr string) *store.Reminder {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		f.reply(ev.UserID, ev.ReplyToken, "ไม่พบรายการนี้แล้วน้า ดูรายการล่าสุดด้วย /reminders ได้เลย", nil)
+		return nil
+	}
+	rem, err := f.store.GetReminder(ctx, id, ev.UserID)
+	if err != nil {
+		log.Error().Str("user_id", ev.UserID).Int64("reminder_id", id).Err(err).Msg("flow: get reminder failed")
+		f.reply(ev.UserID, ev.ReplyToken, "ขอโทษน้า ดึงรายการไม่สำเร็จ ลองใหม่อีกครั้งนะ", nil)
+		return nil
+	}
+	if rem == nil {
+		f.reply(ev.UserID, ev.ReplyToken, "ไม่พบรายการนี้แล้วน้า อาจถูกลบหรือส่งไปแล้ว ดูรายการล่าสุดด้วย /reminders ได้เลย", nil)
+		return nil
+	}
+	return rem
 }
 
 func (f *Flow) handleTarget(ctx context.Context, ev events.PostbackEvent, state *State, choice string) {
@@ -294,6 +445,28 @@ func (f *Flow) handleConfirm(ctx context.Context, ev events.PostbackEvent, state
 		f.promptForStep(ctx, ev.UserID, ev.ReplyToken, state)
 		return
 	}
+	// An edit rewrites the existing row (and resets it to pending so the
+	// scheduler re-arms at the new time); otherwise insert a new one.
+	if state.EditingID != 0 {
+		ok, err := f.store.UpdateReminder(ctx, state.EditingID, ev.UserID, state.Message, state.RemindAt)
+		if err != nil {
+			log.Error().Str("user_id", ev.UserID).Int64("reminder_id", state.EditingID).Err(err).Msg("flow: update reminder failed")
+			f.reply(ev.UserID, ev.ReplyToken, "ขอโทษน้า บันทึกไม่สำเร็จ ลองยืนยันอีกครั้งนะ", nil)
+			return
+		}
+		if err := f.state.Delete(ctx, ev.UserID); err != nil {
+			log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: state delete failed")
+		}
+		if !ok {
+			f.reply(ev.UserID, ev.ReplyToken, "ไม่พบรายการนี้แล้วน้า อาจถูกลบหรือส่งไปแล้ว ดูรายการล่าสุดด้วย /reminders ได้เลย", nil)
+			return
+		}
+		log.Info().Str("user_id", ev.UserID).Int64("reminder_id", state.EditingID).Time("remind_at", state.RemindAt).Msg("flow: reminder updated")
+		f.reply(ev.UserID, ev.ReplyToken, fmt.Sprintf("แก้ไขแล้ว ⏰ จะเตือน \"%s\" %s น้า",
+			state.Message, formatBangkok(state.RemindAt)), nil)
+		return
+	}
+
 	id, err := f.store.CreateReminder(ctx, ev.UserID, state.TargetUserID, state.Message, state.RemindAt)
 	if err != nil {
 		log.Error().Str("user_id", ev.UserID).Err(err).Msg("flow: create reminder failed")
@@ -330,6 +503,8 @@ func (f *Flow) promptForStep(ctx context.Context, userID, replyToken string, sta
 		f.handleTarget(ctx, events.PostbackEvent{UserID: userID, ReplyToken: replyToken}, state, "other")
 	case StepAwaitConfirm:
 		f.askConfirm(ctx, userID, replyToken, state)
+	case StepManage:
+		f.startManage(ctx, userID, replyToken)
 	default:
 		f.reply(userID, replyToken, "จะให้เตือนว่าอะไร เมื่อไหร่? เช่น \"พรุ่งนี้ 9 โมง กินยา\"", nil)
 	}

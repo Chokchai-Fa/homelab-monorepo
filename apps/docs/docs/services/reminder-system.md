@@ -59,10 +59,15 @@ stateDiagram-v2
   await_confirm --> await_details: edit
 ```
 
-Flow state lives in `chat:reminder_flow:<uid>` (Redis, 10 min TTL) and refreshes
-`chat:ai_session:<uid>` each step so the webhook keeps forwarding the user's free
-text. If the state expires mid-conversation, the user gets a friendly "start
-again" message — never a silent drop.
+Flow state lives in `chat:reminder_flow:<uid>` (Redis, 10 min TTL); the webhook
+checks that key directly to keep forwarding the user's free text while the flow
+is alive (no AI session is opened). If the state expires mid-conversation, the
+user gets a friendly "start again" message — never a silent drop.
+
+Users can also **list, edit, and delete** their upcoming reminders with
+`/reminders` (or `ดูเตือน`) — see
+[Commands & keywords](/services/commands#reminders) and the sequence notes in
+the [reminder lifecycle](/diagrams/sequence-reminder#managing-reminders).
 
 ## The status lifecycle
 
@@ -83,6 +88,10 @@ stateDiagram-v2
   failed --> pending: retry after cooldown (quota_429 / no_delivery_ack)
   failed --> [*]: abandoned (>7 days overdue)
   sent --> [*]
+  pending --> cancelled: user deletes (/reminders)
+  scheduled --> cancelled: user deletes (/reminders)
+  scheduled --> pending: user edits (new time, re-armed)
+  cancelled --> [*]
 ```
 
 | Transition | Trigger | Where |
@@ -93,6 +102,13 @@ stateDiagram-v2
 | `sending → failed` | delivery ack error (`quota_429`, `line_<code>`) | notifier |
 | `scheduled → scheduled` | lost expiry event re-armed | scheduler recovery |
 | `sending → failed` | no ack after 5m (`no_delivery_ack`) | scheduler repair |
+| `pending/scheduled → cancelled` | user deletes via `/reminders` | consumer-reminder |
+| `scheduled → pending` | user edits via `/reminders` (re-armed at new time) | consumer-reminder |
+
+Deletes and edits are safe against an already-armed Redis timer **because every
+notifier claim is status-guarded**: when the old timer expires, the claim
+(`UPDATE … WHERE status='scheduled'`) finds a `cancelled` (or re-`pending`ed)
+row, gets 0 rows, and stops. Nothing fires at a deleted or old time.
 | `failed → pending` | retry after 1h cooldown (retryable reasons only) | scheduler repair |
 
 ## Why this many moving parts?

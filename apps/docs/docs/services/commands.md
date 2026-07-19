@@ -45,11 +45,28 @@ also knows these words so a reset never sits in the message-merge buffer.
 | `ตั้งเตือน…` | Thai trigger, no space needed after the keyword. | `ตั้งเตือนพรุ่งนี้เที่ยง ประชุม` |
 | *natural language* | No keyword at all: inside an AI session, the LLM classifier detects reminder intent and hands off to the same flow. | `เตือนฉันตอน 3 ทุ่มหน่อย` |
 | `ยกเลิก` · `cancel` · `/cancel` | Cancels the reminder flow **at any step** — typed or via the Cancel button. | `ยกเลิก` |
+| `/reminders` · `ดูเตือน` · `รายการเตือน` | Lists **your upcoming reminders** (the ones you created, soonest first) with one button per entry — pick one to **edit or delete** it. | `/reminders` |
 
 Trigger keywords are matched identically in **three places** (line-webhook
 `isReminderRequest`, consumer-llm-processor `isReminderCommand`,
-consumer-reminder `isTrigger`); cancel words in two (consumer-llm-processor
-and consumer-reminder `isCancelText`). Change one, change all.
+consumer-reminder `isTrigger`/`isListTrigger`); cancel words in two
+(consumer-llm-processor and consumer-reminder `isCancelText`). Change one,
+change all.
+
+### Managing reminders
+
+`/reminders` shows up to 12 upcoming reminders, each as a quick-reply button:
+
+1. **Pick** a reminder → its details plus `แก้ไข` / `ลบ` / `ยกเลิก` buttons.
+2. **`ลบ` (delete)** — the reminder is cancelled immediately. If its timer was
+   already armed, the expiry fires into nothing (status-guarded claim).
+3. **`แก้ไข` (edit)** — type a new time (the old message is kept), or a whole
+   new "what + when". You get the usual confirm preview before anything is
+   saved; the reminder is re-armed at the new time.
+
+Only the **creator** can see, edit, or delete a reminder — including ones
+targeted at someone else. Reminders that are firing right now or already
+sent/failed no longer appear.
 
 Mid-flow, typing `/reminder` again **restarts** the flow from the beginning —
 the escape hatch for a stuck conversation.

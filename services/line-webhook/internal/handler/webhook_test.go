@@ -166,7 +166,9 @@ func TestIsReminderRequest(t *testing.T) {
 		{"/reminder เตือนพรุ่งนี้ 9 โมง กินยา", true},
 		{"ตั้งเตือน", true},
 		{"ตั้งเตือนกินยาพรุ่งนี้", true},
-		{"/reminders", false},
+		{"/reminders", true}, // manage flow: list / edit / delete
+		{"ดูเตือน", true},
+		{"รายการเตือน", true},
 		{"เตือนฉันหน่อย", false}, // natural phrasing goes via the LLM classifier
 		{"hello", false},
 	}

@@ -186,14 +186,18 @@ func (h *LineHandler) isAIRequest(text string) bool {
 	return trimmed == h.cfg.AIPrefix || strings.HasPrefix(trimmed, h.cfg.AIPrefix+" ")
 }
 
-// isReminderRequest reports whether the message starts a reminder: the hard
-// keyword "/reminder" (alone or with details) or Thai "ตั้งเตือน..." (no
-// space needed - Thai doesn't use them). Must match consumer-llm-processor's
-// view of a trigger.
+// isReminderRequest reports whether the message starts a reminder flow: the
+// create keyword "/reminder" (alone or with details) or Thai "ตั้งเตือน..."
+// (no space needed - Thai doesn't use them), or the manage keywords
+// "/reminders" / "ดูเตือน" / "รายการเตือน" (list, edit, delete). Must match
+// consumer-llm-processor's view of a trigger.
 func isReminderRequest(trimmed string) bool {
 	return trimmed == "/reminder" ||
 		strings.HasPrefix(trimmed, "/reminder ") ||
-		strings.HasPrefix(trimmed, "ตั้งเตือน")
+		strings.HasPrefix(trimmed, "ตั้งเตือน") ||
+		trimmed == "/reminders" ||
+		strings.HasPrefix(trimmed, "ดูเตือน") ||
+		strings.HasPrefix(trimmed, "รายการเตือน")
 }
 
 // ensureProfile fetches and publishes the user's LINE profile at most once

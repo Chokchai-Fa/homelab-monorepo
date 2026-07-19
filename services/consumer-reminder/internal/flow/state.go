@@ -15,6 +15,7 @@ const (
 	StepAwaitUser    = "await_user"    // waiting for a target-user pick
 	StepAwaitDetails = "await_details" // waiting for free text with message+time
 	StepAwaitConfirm = "await_confirm" // waiting for confirm/edit/cancel
+	StepManage       = "manage"        // browsing the upcoming-reminders list
 )
 
 // State is one user's reminder conversation, kept in Redis under
@@ -25,6 +26,9 @@ type State struct {
 	TargetUserID string    `json:"target_user_id,omitempty"`
 	Message      string    `json:"message,omitempty"`
 	RemindAt     time.Time `json:"remind_at,omitempty"`
+	// EditingID, when non-zero, makes confirm UPDATE this reminder instead
+	// of INSERTing a new one.
+	EditingID int64 `json:"editing_id,omitempty"`
 }
 
 // StateStore persists flow state. line-webhook and consumer-llm-processor
