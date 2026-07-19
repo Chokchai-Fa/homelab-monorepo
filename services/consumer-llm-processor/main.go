@@ -30,8 +30,16 @@ type Config struct {
 	GeminiAPIKey string
 	GeminiModel  string
 	// GeminiImageModel generates pictures for "draw me a ..." requests
-	// (Nano Banana line; free tier ~500 images/day). Empty disables.
+	// (Nano Banana line). Google dropped image models from the API free tier
+	// (429 on every call since ~2026-03), so this only works on paid keys;
+	// Cloudflare below is the free path. Empty disables.
 	GeminiImageModel string
+	// Cloudflare Workers AI image generation (free tier 10k neurons/day,
+	// ~230 flux-1-schnell images). Preferred over Gemini when both ID and
+	// token are set.
+	CFAccountID  string
+	CFAPIToken   string
+	CFImageModel string
 	// Optional free-tier providers; each is enabled by setting its API key.
 	GroqAPIKey          string
 	GroqModel           string
@@ -57,6 +65,9 @@ func loadConfig() *Config {
 		GeminiAPIKey:        getEnv("GEMINI_API_KEY", ""),
 		GeminiModel:         getEnv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
 		GeminiImageModel:    getEnv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
+		CFAccountID:         getEnv("CF_ACCOUNT_ID", ""),
+		CFAPIToken:          getEnv("CF_API_TOKEN", ""),
+		CFImageModel:        getEnv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell"),
 		GroqAPIKey:          getEnv("GROQ_API_KEY", ""),
 		GroqModel:           getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
 		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "llama-3.1-8b-instant"),
@@ -119,12 +130,18 @@ func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
 
 	geminiDeep := gemini.Derive("gemini/"+config.GeminiModel+"+think", ai.PersonaInstruction, true)
 
-	// Image generation (Nano Banana) rides the same Gemini key; "draw me a
-	// ..." requests classified as "image" go here instead of a chat chain.
+	// Image generation for "draw me a ..." requests classified as "image".
+	// Cloudflare Workers AI leads (only free-tier image API left); Gemini
+	// (Nano Banana) is used when Cloudflare creds are absent, which needs a
+	// paid Gemini key since the 2026-03 free-tier removal.
 	var imageGen ai.ImageGenerator
-	if config.GeminiImageModel != "" {
+	switch {
+	case config.CFAccountID != "" && config.CFAPIToken != "":
+		imageGen = ai.NewCloudflareImage(config.CFAccountID, config.CFAPIToken, config.CFImageModel)
+		log.Info().Str("model", config.CFImageModel).Msg("startup: cloudflare image generator enabled")
+	case config.GeminiImageModel != "":
 		imageGen = ai.NewGeminiImage(gemini, config.GeminiImageModel)
-		log.Info().Str("model", config.GeminiImageModel).Msg("startup: image generator enabled")
+		log.Info().Str("model", config.GeminiImageModel).Msg("startup: gemini image generator enabled")
 	}
 
 	chain := func(providers ...ai.Provider) []ai.Provider {
