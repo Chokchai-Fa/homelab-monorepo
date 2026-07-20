@@ -8,8 +8,20 @@ title: Overview
 
 This is the documentation for a self-hosted homelab: a **single-node k3s
 cluster running on a Raspberry Pi 4**, managed entirely through GitOps with
-FluxCD, hosting a **LINE chatbot with an AI assistant and a reminder system**
-built as event-driven Go microservices.
+FluxCD, hosting an **event-driven AI chat platform** built as Go microservices.
+
+The core is a channel-agnostic AI pipeline — classify a message, route it
+through a fallback chain of LLM providers, keep conversation memory, and return
+an answer. Two front-end **channels** feed that same pipeline:
+
+- **LINE** — a LINE Official Account with the AI assistant, image
+  understanding/generation, and a reminder system.
+- **Web** — an "Ask AI about me" chat widget on the
+  [portfolio site](https://portfolio.chokchai-dev.xyz), fronted by an HTTP
+  gateway.
+
+New channels reuse the pipeline rather than re-implementing it; only the
+ingress/egress shape differs.
 
 ## The two-repo model
 
@@ -40,8 +52,8 @@ The documentation is organized by layer, from the metal up:
   FluxCD GitOps machinery, the CI/CD pipeline, networking, and monitoring.
 - **[Data services](/data-services/nats)** — NATS, Postgres, and Redis: their
   specs, the messaging contract, and the data model.
-- **[Services](/services/line-chatbot)** — the LINE AI chatbot and the reminder
-  system, described as architecture.
+- **[Services](/services/line-chatbot)** — the LINE AI chatbot, the portfolio
+  web chatbot, and the reminder system, described as architecture.
 - **[Sequence diagrams](/diagrams/sequence-ai-chat)** — the load-bearing
   behaviors, step by step.
 - **[Runbooks](/runbooks/reconciliation)** — the operational knowledge:

@@ -5,7 +5,7 @@ title: Service reference
 
 # Service reference
 
-A one-page cheat sheet for all six Go services: what each subscribes to,
+A one-page cheat sheet for all seven Go services: what each subscribes to,
 publishes, and which data stores it touches. Every service is a single-replica
 Deployment in the `default` namespace, built from `build/go/Dockerfile`.
 
@@ -14,7 +14,8 @@ Deployment in the `default` namespace, built from `build/go/Dockerfile`.
 | Service | Subscribes | Publishes | Postgres | Redis | External |
 |---------|-----------|-----------|:--------:|:-----:|----------|
 | **line-webhook** | — (HTTP ingress) | `ai_request`, `reply`, `postback`, `profile` | — | ✅ | LINE API (profile, image download) |
-| **consumer-llm-processor** | `ai_request` | `reply`, `reminder_request` | ✅ | ✅ | Gemini/Groq/OpenRouter/CF |
+| **portfolio-chat-gateway** | — (HTTP ingress) | `portfolio.chat.ai_request` (request-reply) | — | — | — |
+| **consumer-llm-processor** | `ai_request`, `portfolio.chat.ai_request` | `reply`, `reminder_request`, request-reply answers | ✅ | ✅ | Gemini/Groq/OpenRouter/CF |
 | **consumer-reply-line-user** | `reply` | `delivery` | — | — | LINE API (reply/push) |
 | **consumer-reminder** | `reminder_request`, `postback`, `profile` | `reply` | ✅ | ✅ | — |
 | **worker-reminder-scheduler** | — (cron) | — | ✅ | ✅ | — |
@@ -31,11 +32,22 @@ attachments, fetches user profiles (gated by `chat:profile_seen`). **Never
 replies to LINE directly.**
 - **Env:** `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN`, `NATS_*`, `REDIS_*`, `AI_PREFIX` (`/ai`), `AI_SESSION_TTL`, `IMAGE_TTL`, `PORT`.
 
+### portfolio-chat-gateway
+The web channel's HTTP entry point (Echo, port 8081; `POST /chat`, `GET
+/healthz`). Validates and per-IP rate-limits visitor messages, then bridges each
+to the AI pipeline over NATS **request-reply** (`portfolio.chat.ai_request`) and
+returns the answer on the open HTTP request. ClusterIP-only — called solely by
+portfolio-web's `/api/chat` proxy. No datastore of its own.
+- **Env:** `NATS_*`, `PORT` (8081), `RATE_LIMIT_PER_MIN` (10), `MAX_MESSAGE_CHARS` (1000), `REQUEST_TIMEOUT` (60s).
+
 ### consumer-llm-processor
-The AI brain: classify → route to a provider chain → answer, with conversation
-memory and image generation. Detects reminder intent and hands off.
+The AI brain, shared by both channels: classify → route to a provider chain →
+answer, with conversation memory and image generation. Detects reminder intent
+and hands off. Serves the LINE `ai_request` subject (fire-and-forget) **and** the
+web `portfolio.chat.ai_request` subject (request-reply, professional portfolio
+persona, history keyed `web:<session_id>`).
 - **Env:** `NATS_*`, `DATABASE_URL`, `REDIS_*`, `GEMINI_API_KEY`, `GEMINI_MODEL` (`gemini-3.1-flash-lite`), optional `GROQ_API_KEY`/`GROQ_MODEL`/`GROQ_CLASSIFIER_MODEL`, `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`/`OPENROUTER_VISION_MODEL`, `CF_ACCOUNT_ID`/`CF_API_TOKEN`/`CF_IMAGE_MODEL`, `DEBOUNCE_WINDOW` (5s), `DEBOUNCE_MAX_WAIT` (15s).
-- **Owns:** `line_ai_messages`.
+- **Owns:** `line_ai_messages` (shared by LINE users and `web:` sessions).
 
 ### consumer-reply-line-user
 The only egress, and the only service that builds LINE message shapes. Delivers

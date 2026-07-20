@@ -38,6 +38,7 @@ const sidebars: SidebarsConfig = {
       label: 'Services',
       items: [
         'services/line-chatbot',
+        'services/portfolio-chatbot',
         'services/reminder-system',
         'services/service-reference',
         'services/commands',
@@ -48,6 +49,7 @@ const sidebars: SidebarsConfig = {
       label: 'Sequence diagrams',
       items: [
         'diagrams/sequence-ai-chat',
+        'diagrams/sequence-portfolio-chat',
         'diagrams/sequence-reminder',
         'diagrams/sequence-image',
       ],

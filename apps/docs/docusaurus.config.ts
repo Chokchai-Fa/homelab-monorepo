@@ -7,7 +7,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 // architecture and sequence diagrams.
 const config: Config = {
   title: 'Homelab Docs',
-  tagline: 'GitOps k3s cluster, data services, and the LINE chatbot + reminder system',
+  tagline: 'GitOps k3s cluster, data services, and an event-driven AI chat platform (LINE + web)',
   favicon: 'img/favicon.svg',
 
   url: 'https://docs.chokchai-dev.xyz',
