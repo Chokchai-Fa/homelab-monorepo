@@ -17,11 +17,17 @@ This service is the AI worker in the LINE chat pipeline. It subscribes to NATS e
 - Publishes the final reply to `line.chat.reply`
 - Supports simple conversation controls such as `/reset` and empty-query guidance
 - Also serves the portfolio website's chat widget: a second, request-reply
-  subscription on `portfolio.chat.ai_request` (called by
-  `portfolio-chat-gateway`) that reuses the same provider chains and
-  conversation store with a professional portfolio persona. Web sessions are
-  stored as `web:<session_id>`; debouncing, reminders and images are
-  LINE-only and skipped on this channel
+  subscription on `portfolio.chat.ai_request` (plus a streaming variant on
+  `portfolio.chat.ai_request.stream`) called by `portfolio-chat-gateway`, that
+  reuses the same provider chains and conversation store with a professional
+  portfolio persona. Web sessions are stored as `web:<session_id>`; debouncing,
+  reminders and images are LINE-only and skipped on this channel
+- Optional **RAG** for the web channel (`internal/knowledge`, `RAG_ENABLED`):
+  a curated corpus is embedded into a `portfolio_knowledge` pgvector table at
+  startup, and the most relevant chunks are retrieved and injected per question
+  so answers are grounded and cite a source. Off by default; needs the
+  `pgvector/pgvector` Postgres image and embeddings access. Any startup failure
+  degrades to persona-only answers
 
 ## Runtime dependencies
 

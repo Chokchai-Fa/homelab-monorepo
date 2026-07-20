@@ -79,16 +79,40 @@ type StreamChunk struct {
 	Error string `json:"error,omitempty"`
 }
 
-// Consumer answers portfolio chat requests over NATS request-reply.
-type Consumer struct {
-	store store.Store
-	ai    Responder
-	nc    *nats.Conn
+// ContextRetriever supplies retrieval-augmented context for a question: a
+// block of relevant facts to prepend to the prompt, or "" when RAG is disabled
+// or nothing relevant is found. Retrieval is best-effort, so it never returns
+// an error - a failure just yields "". Satisfied by *knowledge.Retriever.
+type ContextRetriever interface {
+	RetrieveContext(ctx context.Context, query string) string
 }
 
-// New creates the web chat consumer.
-func New(s store.Store, r Responder, nc *nats.Conn) *Consumer {
-	return &Consumer{store: s, ai: r, nc: nc}
+// Consumer answers portfolio chat requests over NATS request-reply.
+type Consumer struct {
+	store     store.Store
+	ai        Responder
+	nc        *nats.Conn
+	retriever ContextRetriever // nil disables RAG
+}
+
+// New creates the web chat consumer. retriever may be nil, in which case the
+// chat answers from the persona's prompt-embedded facts alone (no RAG).
+func New(s store.Store, r Responder, nc *nats.Conn, retriever ContextRetriever) *Consumer {
+	return &Consumer{store: s, ai: r, nc: nc, retriever: retriever}
+}
+
+// augment prepends retrieved context to the message sent to the LLM, without
+// changing what gets stored in history (that stays the raw question). Returns
+// the query unchanged when RAG is off or nothing relevant is retrieved.
+func (c *Consumer) augment(ctx context.Context, query string) string {
+	if c.retriever == nil {
+		return query
+	}
+	block := c.retriever.RetrieveContext(ctx, query)
+	if block == "" {
+		return query
+	}
+	return block + "\n\nQuestion: " + query
 }
 
 // Subscribe attaches the consumer as a queue subscriber. Each request is
@@ -191,7 +215,7 @@ func (c *Consumer) streamRespond(ctx context.Context, data []byte, emit func(del
 	}
 
 	start := time.Now()
-	result, err := c.ai.RouteStream(ctx, history, query, emit)
+	result, err := c.ai.RouteStream(ctx, history, c.augment(ctx, query), emit)
 	if err != nil {
 		log.Error().Str("user_id", userID).Err(err).Msg("webchat: stream llm request failed")
 		// If nothing was streamed yet the visitor has a blank bubble; give
@@ -289,7 +313,7 @@ func (c *Consumer) respond(ctx context.Context, data []byte) Response {
 	}
 
 	start := time.Now()
-	result, err := c.ai.Route(ctx, history, query, nil)
+	result, err := c.ai.Route(ctx, history, c.augment(ctx, query), nil)
 	if err != nil {
 		log.Error().Str("user_id", userID).Err(err).Msg("webchat: llm request failed")
 		return Response{Text: unavailableText}

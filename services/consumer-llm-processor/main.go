@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"consumer-llm-processor/internal/consumer"
 	"consumer-llm-processor/internal/extract"
 	"consumer-llm-processor/internal/imagecache"
+	"consumer-llm-processor/internal/knowledge"
 	"consumer-llm-processor/internal/reminderflow"
 	"consumer-llm-processor/internal/store"
 	"consumer-llm-processor/internal/webchat"
@@ -58,6 +61,15 @@ type Config struct {
 	// quiet this long, answering the burst as one request; 0 disables.
 	DebounceWindow  time.Duration
 	DebounceMaxWait time.Duration
+	// RAG (retrieval-augmented generation) for the portfolio web channel.
+	// Disabled by default; needs pgvector in Postgres and an embeddings-capable
+	// Gemini key. When off (or on any startup failure) the web chat answers
+	// from the persona's prompt-embedded facts alone.
+	RAGEnabled     bool
+	EmbedModel     string
+	EmbedDim       int
+	RAGTopK        int
+	RAGMaxDistance float64
 }
 
 func loadConfig() *Config {
@@ -88,7 +100,92 @@ func loadConfig() *Config {
 		// rare merges mean it can go lower.
 		DebounceWindow:  getEnvDuration("DEBOUNCE_WINDOW", 5*time.Second),
 		DebounceMaxWait: getEnvDuration("DEBOUNCE_MAX_WAIT", 15*time.Second),
+		RAGEnabled:      getEnvBool("RAG_ENABLED", false),
+		EmbedModel:      getEnv("EMBED_MODEL", "gemini-embedding-001"),
+		EmbedDim:        getEnvInt("EMBED_DIM", 768),
+		RAGTopK:         getEnvInt("RAG_TOP_K", 4),
+		RAGMaxDistance:  getEnvFloat("RAG_MAX_DISTANCE", 0.65),
 	}
+}
+
+// buildRetriever wires the RAG retriever for the web channel and ingests the
+// corpus into pgvector at startup. It returns nil (RAG off) when disabled or
+// on any failure - retrieval is a best-effort enhancement, never a hard
+// dependency, so a missing pgvector extension or embeddings quota must not
+// take the chat down.
+func buildRetriever(ctx context.Context, config *Config) *knowledge.Retriever {
+	if !config.RAGEnabled {
+		log.Info().Msg("startup: RAG disabled (RAG_ENABLED not set) - web chat uses prompt facts only")
+		return nil
+	}
+	if config.GeminiAPIKey == "" || config.DatabaseURL == "" {
+		log.Error().Msg("startup: RAG enabled but GEMINI_API_KEY/DATABASE_URL missing - disabling RAG")
+		return nil
+	}
+
+	embedder, err := knowledge.NewGeminiEmbedder(ctx, config.GeminiAPIKey, config.EmbedModel, config.EmbedDim)
+	if err != nil {
+		log.Error().Err(err).Msg("startup: failed to init embedder - disabling RAG")
+		return nil
+	}
+	vstore, err := knowledge.NewPGVectorStore(ctx, config.DatabaseURL, config.EmbedDim)
+	if err != nil {
+		log.Error().Err(err).Msg("startup: failed to init pgvector store - disabling RAG")
+		return nil
+	}
+
+	retriever := knowledge.NewRetriever(embedder, vstore, config.RAGTopK, config.RAGMaxDistance)
+
+	// Ingest with a bounded timeout so a slow/unavailable embeddings API
+	// doesn't hang startup; a failure here just means no fresh embeddings.
+	ingestCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	n, err := retriever.Ingest(ingestCtx, knowledge.Documents())
+	if err != nil {
+		log.Error().Err(err).Msg("startup: RAG corpus ingest failed - disabling RAG")
+		vstore.Close()
+		return nil
+	}
+	log.Info().Int("embedded", n).Str("model", config.EmbedModel).Int("dim", config.EmbedDim).Msg("startup: RAG enabled - corpus ingested")
+	return retriever
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "":
+		return defaultValue
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Error().Str("key", key).Str("value", v).Msg("config: invalid int - using default")
+		return defaultValue
+	}
+	return n
+}
+
+func getEnvFloat(key string, defaultValue float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		log.Error().Str("key", key).Str("value", v).Msg("config: invalid float - using default")
+		return defaultValue
+	}
+	return f
 }
 
 func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
@@ -303,9 +400,15 @@ func main() {
 		Str("reply_subject", consumer.ReplySubject).
 		Msg("startup: subscribed - consumer running")
 
+	// Optional RAG for the portfolio web channel: embed a curated corpus into
+	// pgvector and retrieve relevant chunks per question. Best-effort - any
+	// setup failure logs and leaves retriever nil, so the web chat still
+	// answers from the persona's own facts.
+	retriever := buildRetriever(ctx, config)
+
 	// Portfolio website chat channel: request-reply from
 	// portfolio-chat-gateway, same store, portfolio persona.
-	web := webchat.New(conversations, buildPortfolioRouter(gemini, config), nc)
+	web := webchat.New(conversations, buildPortfolioRouter(gemini, config), nc, retriever)
 	webSub, err := web.Subscribe()
 	if err != nil {
 		log.Fatal().Str("subject", webchat.RequestSubject).Err(err).Msg("startup: failed to subscribe web chat")
