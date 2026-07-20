@@ -11,6 +11,13 @@ look at, and ask it to generate pictures. It spans three services —
 **consumer-reply-line-user** (egress) — plus Postgres for memory and Redis for
 sessions and image handoff.
 
+:::note One brain, multiple channels
+This page describes the **LINE channel**. The same **consumer-llm-processor**
+pipeline also answers the [portfolio web chatbot](/services/portfolio-chatbot)
+over NATS request-reply. The classify → route → memory core is shared; only the
+ingress/egress and persona differ.
+:::
+
 ```mermaid
 flowchart LR
   user([LINE user])
