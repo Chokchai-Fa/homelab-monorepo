@@ -96,6 +96,65 @@ func (h *LineHandler) markAsRead(body []byte, index int) error {
 	return nil
 }
 
+// loadingEndpoint is LINE's chat-loading-indicator API
+// (https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/).
+// Package-level so tests can point it at a local server.
+var loadingEndpoint = "https://api.line.me/v2/bot/chat/loading/start"
+
+// loadingSeconds must be a multiple of 5, max 60. The animation is dismissed
+// automatically as soon as the bot sends a message, so always ask for the max
+// to cover the debounce window plus LLM latency; it only runs out on a reply
+// that never comes.
+const loadingSeconds = 60
+
+// loadingHTTPClient bounds the best-effort loading call so a slow LINE API
+// can never pile up goroutines.
+var loadingHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// showLoadingAnimation displays LINE's typing/loading indicator in the user's
+// one-on-one chat while the AI pipeline works on the reply. Best-effort and
+// asynchronous: the webhook response must never wait on it, and failures are
+// only logged.
+func (h *LineHandler) showLoadingAnimation(userID string) {
+	if userID == "" || h.cfg == nil || h.cfg.ChannelToken == "" {
+		return
+	}
+	go func() {
+		if err := h.startLoadingAnimation(userID); err != nil {
+			log.Warn().Str("user_id", userID).Err(err).Msg("webhook: failed to show loading animation")
+		}
+	}()
+}
+
+func (h *LineHandler) startLoadingAnimation(userID string) error {
+	data, err := json.Marshal(map[string]any{
+		"chatId":         userID,
+		"loadingSeconds": loadingSeconds,
+	})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, loadingEndpoint, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.cfg.ChannelToken)
+
+	resp, err := loadingHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("loading animation failed with status %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
 func extractMarkAsReadToken(body []byte, index int) (string, error) {
 	var payload struct {
 		Events []struct {
@@ -271,6 +330,11 @@ func (h *LineHandler) publishAIRequestWithImage(event *linebot.Event, query, ima
 		log.Error().Str("user_id", event.Source.UserID).Msg("webhook: AI request dropped - NATS publisher not connected")
 		return nil
 	}
+
+	// The AI answer takes a while (debounce window + LLM call), so show the
+	// chat loading indicator meanwhile; it disappears on its own the moment
+	// consumer-reply-line-user delivers the reply.
+	h.showLoadingAnimation(event.Source.UserID)
 
 	err := h.pub.PublishAIRequest(publisher.AIRequestEvent{
 		UserID:     event.Source.UserID,
