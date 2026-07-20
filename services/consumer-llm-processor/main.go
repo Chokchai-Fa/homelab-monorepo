@@ -18,6 +18,7 @@ import (
 	"consumer-llm-processor/internal/imagecache"
 	"consumer-llm-processor/internal/reminderflow"
 	"consumer-llm-processor/internal/store"
+	"consumer-llm-processor/internal/webchat"
 )
 
 const (
@@ -168,6 +169,48 @@ func buildRouter(gemini *ai.Gemini, config *Config) *ai.Router {
 	)
 }
 
+// buildPortfolioRouter assembles a second router for the portfolio website
+// chat channel: same provider chains and classifier as the LINE router, but
+// every provider carries the professional portfolio persona, and the
+// LINE-only capabilities (vision, image generation) are left out - webchat
+// answers those intents with a polite redirect instead.
+func buildPortfolioRouter(gemini *ai.Gemini, config *Config) *ai.Router {
+	geminiWeb := gemini.Derive("gemini-portfolio", ai.PortfolioPersonaInstruction, false)
+	geminiWebDeep := gemini.Derive("gemini-portfolio+think", ai.PortfolioPersonaInstruction, true)
+
+	var groq, openrouter ai.Provider
+	if config.GroqAPIKey != "" {
+		groq = ai.NewOpenAI("groq-portfolio", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqModel, ai.PortfolioPersonaInstruction, false)
+	}
+	if config.OpenRouterAPIKey != "" {
+		openrouter = ai.NewOpenAI("openrouter-portfolio", "https://openrouter.ai/api/v1", config.OpenRouterAPIKey, config.OpenRouterModel, ai.PortfolioPersonaInstruction, false)
+	}
+
+	var classifier ai.Provider
+	if config.GroqAPIKey != "" {
+		classifier = ai.NewOpenAI("groq-classifier", "https://api.groq.com/openai/v1", config.GroqAPIKey, config.GroqClassifierModel, ai.ClassifierInstruction, false)
+	} else {
+		classifier = gemini.Derive("gemini-classifier", ai.ClassifierInstruction, false)
+	}
+
+	chain := func(providers ...ai.Provider) []ai.Provider {
+		out := make([]ai.Provider, 0, len(providers))
+		for _, p := range providers {
+			if p != nil {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return ai.NewRouter(classifier,
+		chain(geminiWeb, groq, openrouter),                // simple
+		chain(groq, geminiWeb, openrouter),                // general
+		chain(openrouter, groq, geminiWebDeep, geminiWeb), // technical
+		nil, // no vision: the web widget is text-only
+		nil, // no image generation on the web channel
+	)
+}
+
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -259,6 +302,19 @@ func main() {
 		Str("queue", consumer.QueueGroup).
 		Str("reply_subject", consumer.ReplySubject).
 		Msg("startup: subscribed - consumer running")
+
+	// Portfolio website chat channel: request-reply from
+	// portfolio-chat-gateway, same store, portfolio persona.
+	web := webchat.New(conversations, buildPortfolioRouter(gemini, config), nc)
+	webSub, err := web.Subscribe()
+	if err != nil {
+		log.Fatal().Str("subject", webchat.RequestSubject).Err(err).Msg("startup: failed to subscribe web chat")
+	}
+	defer webSub.Unsubscribe()
+	log.Info().
+		Str("subject", webchat.RequestSubject).
+		Str("queue", webchat.QueueGroup).
+		Msg("startup: subscribed - web chat channel running")
 
 	// Pure consumer: no HTTP server, just block until asked to shut down.
 	sig := make(chan os.Signal, 1)

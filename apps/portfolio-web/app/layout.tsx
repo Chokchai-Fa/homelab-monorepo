@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import Header from "@/components/Header";
+import ChatWidget from "@/components/chat/ChatWidget";
 
 import PageTransition from "@/components/PageTransition";
 import StairTransition from "@/components/StairTransition";
@@ -37,7 +38,7 @@ export default function RootLayout({
         <PageTransition>
           {children}
         </PageTransition>
-
+        <ChatWidget />
       </body>
     </html>
   );

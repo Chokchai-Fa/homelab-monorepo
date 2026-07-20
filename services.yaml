@@ -80,6 +80,21 @@ services:
       - "services/consumer-llm-processor/**"
       - "build/go/**"
 
+  - name: portfolio-chat-gateway
+    image: portfolio-chat-gateway
+    context: services/portfolio-chat-gateway
+    dockerfile: build/go/Dockerfile
+    versionFile: services/portfolio-chat-gateway/VERSION
+    platforms: linux/amd64,linux/arm64
+    buildArgs:
+      GO_VERSION: "1.25"
+      MAIN_PATH: "./"
+      PORT: "8081"
+    test: "go test ./..."
+    paths:
+      - "services/portfolio-chat-gateway/**"
+      - "build/go/**"
+
   - name: consumer-reply-line-user
     image: consumer-reply-line-user
     context: services/consumer-reply-line-user
