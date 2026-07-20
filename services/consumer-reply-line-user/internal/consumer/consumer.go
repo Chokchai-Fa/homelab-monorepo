@@ -275,12 +275,16 @@ func splitReplyMessages(text string) []string {
 		return nil
 	}
 
+	// Operate on runes, not bytes: maxMessageChars is LINE's character
+	// limit, and byte-slicing multi-byte text (Thai, emoji, ...) can cut a
+	// rune in half, leaving an individual message part that isn't valid
+	// UTF-8 on its own even though the reassembled text is correct.
 	var result []string
-	var current strings.Builder
+	var current []rune
 	flush := func() {
-		if current.Len() > 0 {
-			result = append(result, current.String())
-			current.Reset()
+		if len(current) > 0 {
+			result = append(result, string(current))
+			current = nil
 		}
 	}
 
@@ -289,18 +293,19 @@ func splitReplyMessages(text string) []string {
 		if part == "" {
 			continue
 		}
-		for len(part) > maxMessageChars {
+		partRunes := []rune(part)
+		for len(partRunes) > maxMessageChars {
 			flush()
-			result = append(result, part[:maxMessageChars])
-			part = part[maxMessageChars:]
+			result = append(result, string(partRunes[:maxMessageChars]))
+			partRunes = partRunes[maxMessageChars:]
 		}
-		if current.Len() > 0 && current.Len()+len("\n\n")+len(part) > maxMessageChars {
+		if len(current) > 0 && len(current)+2+len(partRunes) > maxMessageChars {
 			flush()
 		}
-		if current.Len() > 0 {
-			current.WriteString("\n\n")
+		if len(current) > 0 {
+			current = append(current, '\n', '\n')
 		}
-		current.WriteString(part)
+		current = append(current, partRunes...)
 	}
 	flush()
 

@@ -400,28 +400,30 @@ func TestHandleDeliversEndToEndViaReplyToken(t *testing.T) {
 	}
 }
 
-func TestSplitReplyMessagesByteLimitCanSplitMultiByteRune(t *testing.T) {
-	// splitReplyMessages compares byte lengths (len(part)) against
-	// maxMessageChars, not rune counts. maxMessageChars (5000) is not a
-	// multiple of the 3-byte encoding of "ก", so a long run of multi-byte
-	// characters gets cut mid-rune. This test pins that existing behavior
-	// (each part still concatenates back losslessly) and documents the
-	// caveat: an individual part sent as its own LINE message is not
-	// guaranteed to be valid UTF-8 on its own.
-	text := strings.Repeat("ก", 4000) // 12000 bytes total
+func TestSplitReplyMessagesMultiByteRuneNeverSplitMidRune(t *testing.T) {
+	// splitReplyMessages compares rune counts against maxMessageChars, not
+	// byte lengths, so a long run of multi-byte characters (Thai, emoji,
+	// ...) is split on rune boundaries: every part stays valid UTF-8 on its
+	// own, and the parts still concatenate back to the original text.
+	text := strings.Repeat("ก", 12000) // 36000 bytes, 12000 runes
 	got := splitReplyMessages(text)
 
 	if len(got) != 3 {
 		t.Fatalf("got %d parts, want 3", len(got))
 	}
-	if len(got[0]) != maxMessageChars || len(got[1]) != maxMessageChars {
-		t.Fatalf("part byte lengths = %d, %d, want %d, %d", len(got[0]), len(got[1]), maxMessageChars, maxMessageChars)
+	if n := utf8.RuneCountInString(got[0]); n != maxMessageChars {
+		t.Errorf("part 0 rune count = %d, want %d", n, maxMessageChars)
+	}
+	if n := utf8.RuneCountInString(got[1]); n != maxMessageChars {
+		t.Errorf("part 1 rune count = %d, want %d", n, maxMessageChars)
 	}
 	if joined := got[0] + got[1] + got[2]; joined != text {
 		t.Fatal("parts do not reconstruct the original text byte-for-byte")
 	}
-	if utf8.ValidString(got[0]) {
-		t.Error("expected the byte-boundary split to break rune #1667 of the input (documents a real corner case, not just a hardcoded expectation)")
+	for i, part := range got {
+		if !utf8.ValidString(part) {
+			t.Errorf("part %d is not valid UTF-8 on its own: %q", i, part)
+		}
 	}
 }
 
