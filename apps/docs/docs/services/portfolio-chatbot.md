@@ -119,12 +119,49 @@ conversation store with the LINE path, but:
   image request, the channel answers with a short "I'm a Q&A assistant" redirect
   rather than acting on it.
 
-:::note Knowledge is prompt-embedded, for now
-The assistant only knows what `PortfolioPersonaInstruction` tells it. When
-Chokchai adds something to the site (a new role, project or paper), the fact must
-be added to that prompt too. Retrieval over the résumé/site content (RAG) is a
-planned later phase; until then, "the AI didn't know X" usually means "X isn't in
-the prompt yet."
+## Retrieval-augmented generation (RAG)
+
+On top of the persona's baseline facts, the web channel can **retrieve** the
+most relevant chunks of a curated corpus and inject them into the prompt, so
+answers stay grounded and can **cite a source**. It's optional and
+feature-flagged (`RAG_ENABLED`): when off — or on any startup failure — the
+chat falls back to the persona facts alone, so RAG never becomes a hard
+dependency.
+
+```mermaid
+flowchart LR
+  subgraph ingest["at startup (idempotent)"]
+    kb[curated corpus<br/>internal/knowledge] --> emb1[Gemini embeddings]
+    emb1 --> pg[(pgvector<br/>portfolio_knowledge)]
+  end
+  subgraph query["per question"]
+    q[visitor question] --> emb2[embed query]
+    emb2 --> search[cosine search top-k] --> pg
+    pg --> ctx[context block + citations]
+    ctx --> llm[persona + retrieved facts → answer]
+  end
+```
+
+- **Corpus** (`internal/knowledge`): small, single-topic chunks derived from the
+  résumé and site (roles, education, the GitCoFL/InCIT 2025 paper, skills,
+  awards, the homelab). Each has a stable ID and a source label for citations.
+- **Ingestion**: at startup the service embeds any **changed** chunks (detected
+  by content hash) and upserts them into the `portfolio_knowledge` pgvector
+  table — so restarts are cheap and edits re-embed only what moved.
+- **Retrieval**: the question is embedded and matched by cosine distance;
+  results past `RAG_MAX_DISTANCE` are dropped so an off-topic question pulls in
+  nothing. The top-k chunks become a context block ("use these facts and cite
+  the source") prepended to the question **sent to the model** — the raw
+  question is still what gets stored in history.
+- **Graceful degradation**: no pgvector extension, no embeddings quota, or
+  `RAG_ENABLED=false` → the retriever is simply absent and the persona answers
+  alone. Enabling it before the pgvector rollout finishes is safe.
+
+:::note Persona facts are the floor, not the ceiling
+The persona still carries the core facts as a baseline (so the chat works with
+RAG off). As the corpus grows, RAG supplies depth and citations on top. Adding a
+new fact ideally means adding a `knowledge` chunk; the persona only needs the
+essentials.
 :::
 
 ## Configuration
