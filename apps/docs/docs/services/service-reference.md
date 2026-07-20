@@ -33,11 +33,13 @@ replies to LINE directly.**
 - **Env:** `LINE_CHANNEL_SECRET`, `LINE_CHANNEL_ACCESS_TOKEN`, `NATS_*`, `REDIS_*`, `AI_PREFIX` (`/ai`), `AI_SESSION_TTL`, `IMAGE_TTL`, `PORT`.
 
 ### portfolio-chat-gateway
-The web channel's HTTP entry point (Echo, port 8081; `POST /chat`, `GET
-/healthz`). Validates and per-IP rate-limits visitor messages, then bridges each
-to the AI pipeline over NATS **request-reply** (`portfolio.chat.ai_request`) and
-returns the answer on the open HTTP request. ClusterIP-only — called solely by
-portfolio-web's `/api/chat` proxy. No datastore of its own.
+The web channel's HTTP entry point (Echo, port 8081; `POST /chat/stream` (SSE,
+default), `POST /chat` (whole answer), `GET /status`, `GET /healthz`). Validates
+and per-IP rate-limits visitor messages, then bridges each to the AI pipeline
+over NATS — **request-reply** (`portfolio.chat.ai_request`) for the unary path,
+and a **reply-inbox stream** (`portfolio.chat.ai_request.stream`) for the SSE
+path. ClusterIP-only — called solely by portfolio-web's `/api/chat*` proxies. No
+datastore of its own.
 - **Env:** `NATS_*`, `PORT` (8081), `RATE_LIMIT_PER_MIN` (10), `MAX_MESSAGE_CHARS` (1000), `REQUEST_TIMEOUT` (60s).
 
 ### consumer-llm-processor

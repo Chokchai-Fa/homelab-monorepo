@@ -311,10 +311,16 @@ func main() {
 		log.Fatal().Str("subject", webchat.RequestSubject).Err(err).Msg("startup: failed to subscribe web chat")
 	}
 	defer webSub.Unsubscribe()
+	webStreamSub, err := web.SubscribeStream()
+	if err != nil {
+		log.Fatal().Str("subject", webchat.RequestStreamSubject).Err(err).Msg("startup: failed to subscribe web chat stream")
+	}
+	defer webStreamSub.Unsubscribe()
 	log.Info().
 		Str("subject", webchat.RequestSubject).
+		Str("stream_subject", webchat.RequestStreamSubject).
 		Str("queue", webchat.QueueGroup).
-		Msg("startup: subscribed - web chat channel running")
+		Msg("startup: subscribed - web chat channel running (unary + streaming)")
 
 	// Pure consumer: no HTTP server, just block until asked to shut down.
 	sig := make(chan os.Signal, 1)

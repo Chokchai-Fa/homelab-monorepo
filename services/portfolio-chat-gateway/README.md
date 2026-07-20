@@ -7,9 +7,15 @@ request-reply (`portfolio.chat.ai_request`) and returns the answer.
 
 ## What it does
 
+- `POST /chat/stream` — the default. Same body as `/chat`, but returns a
+  `text/event-stream` of `data: {"delta":"..."}` frames ending with
+  `data: {"done":true}`, so the widget renders the answer token-by-token.
+  Bridged over NATS with a reply inbox on `portfolio.chat.ai_request.stream`.
 - `POST /chat` — body `{"session_id": "<uuid>", "message": "..."}`, returns
-  `{"text": "..."}`. The session ID is a browser-generated UUID; the
-  consumer stores conversation history under `web:<session_id>`.
+  `{"text": "..."}` (whole answer). The session ID is a browser-generated UUID;
+  the consumer stores conversation history under `web:<session_id>`.
+- `GET /status` — live homelab health (`{status, nats, uptime, host}`) powering
+  the widget's "answered from my homelab" card.
 - `GET /healthz` — liveness probe.
 - Per-visitor-IP rate limiting (`RATE_LIMIT_PER_MIN`, default 10/min) and a
   message size cap (`MAX_MESSAGE_CHARS`, default 1000) protect the free-tier

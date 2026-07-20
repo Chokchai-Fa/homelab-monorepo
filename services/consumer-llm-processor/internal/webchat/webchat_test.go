@@ -66,6 +66,18 @@ func (f *fakeResponder) Route(_ context.Context, history []store.Message, userMe
 	return f.result, f.err
 }
 
+func (f *fakeResponder) RouteStream(_ context.Context, history []store.Message, userMessage string, emit func(string) error) (ai.Result, error) {
+	f.calls++
+	f.lastMessage = userMessage
+	f.lastHistory = history
+	if f.err == nil && f.result.Text != "" {
+		if e := emit(f.result.Text); e != nil {
+			return f.result, e
+		}
+	}
+	return f.result, f.err
+}
+
 func request(t *testing.T, sessionID, message string) []byte {
 	t.Helper()
 	data, err := json.Marshal(Request{SessionID: sessionID, Message: message})
@@ -204,6 +216,90 @@ func TestRespondGeneratedImageAnswersOffTopic(t *testing.T) {
 	resp := c.respond(context.Background(), request(t, "s1", "draw a cat"))
 	if resp.Text != offTopicText {
 		t.Fatalf("expected off-topic text, got %+v", resp)
+	}
+}
+
+// streamCollector captures the frames streamRespond emits, mirroring what the
+// gateway would forward to the browser.
+type streamCollector struct {
+	deltas   []string
+	doneErr  string
+	doneRuns int
+}
+
+func (s *streamCollector) emit(delta string) error { s.deltas = append(s.deltas, delta); return nil }
+func (s *streamCollector) done(errText string)     { s.doneErr = errText; s.doneRuns++ }
+func (s *streamCollector) text() string {
+	out := ""
+	for _, d := range s.deltas {
+		out += d
+	}
+	return out
+}
+
+func TestStreamRespondEmitsDeltasStoresAndDonesOnce(t *testing.T) {
+	store := &fakeHistoryStore{}
+	// fakeResponder emits result.Text as one delta via RouteStream.
+	c := New(store, &fakeResponder{result: ai.Result{Text: "He works at LINE."}}, nil)
+	col := &streamCollector{}
+	c.streamRespond(context.Background(), request(t, "abc-1", "where?"), col.emit, col.done)
+
+	if col.text() != "He works at LINE." {
+		t.Fatalf("streamed %q", col.text())
+	}
+	if col.doneRuns != 1 || col.doneErr != "" {
+		t.Fatalf("expected exactly one clean done, got runs=%d err=%q", col.doneRuns, col.doneErr)
+	}
+	if len(store.appended) != 2 || store.lastUserID != "web:abc-1" {
+		t.Fatalf("expected both turns stored under web: key, got %+v / %q", store.appended, store.lastUserID)
+	}
+}
+
+func TestStreamRespondEmptyMessageHintNoStore(t *testing.T) {
+	store := &fakeHistoryStore{}
+	c := New(store, &fakeResponder{}, nil)
+	col := &streamCollector{}
+	c.streamRespond(context.Background(), request(t, "s1", "  "), col.emit, col.done)
+	if col.text() != usageHint || col.doneRuns != 1 {
+		t.Fatalf("expected usage hint + done, got %q runs=%d", col.text(), col.doneRuns)
+	}
+	if len(store.appended) != 0 {
+		t.Fatal("must not store on empty message")
+	}
+}
+
+func TestStreamRespondResetClears(t *testing.T) {
+	store := &fakeHistoryStore{}
+	c := New(store, &fakeResponder{}, nil)
+	col := &streamCollector{}
+	c.streamRespond(context.Background(), request(t, "s1", "/reset"), col.emit, col.done)
+	if col.text() != resetDone || store.clearCalls != 1 {
+		t.Fatalf("expected reset, got %q clears=%d", col.text(), store.clearCalls)
+	}
+}
+
+func TestStreamRespondLLMErrorEmitsFallback(t *testing.T) {
+	store := &fakeHistoryStore{}
+	c := New(store, &fakeResponder{err: errors.New("boom")}, nil)
+	col := &streamCollector{}
+	c.streamRespond(context.Background(), request(t, "s1", "hi"), col.emit, col.done)
+	if col.text() != unavailableText {
+		t.Fatalf("expected fallback text, got %q", col.text())
+	}
+	if col.doneErr == "" {
+		t.Fatal("expected done to carry an error marker")
+	}
+	if len(store.appended) != 0 {
+		t.Fatal("failed answers must not be stored")
+	}
+}
+
+func TestStreamRespondOffTopicIntent(t *testing.T) {
+	c := New(&fakeHistoryStore{}, &fakeResponder{result: ai.Result{ReminderIntent: true}}, nil)
+	col := &streamCollector{}
+	c.streamRespond(context.Background(), request(t, "s1", "remind me"), col.emit, col.done)
+	if col.text() != offTopicText || col.doneRuns != 1 {
+		t.Fatalf("expected off-topic redirect, got %q", col.text())
 	}
 }
 

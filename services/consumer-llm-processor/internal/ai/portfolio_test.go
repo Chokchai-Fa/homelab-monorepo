@@ -9,9 +9,9 @@ import "testing"
 func TestPortfolioPersonaContainsKeyFacts(t *testing.T) {
 	facts := []string{
 		"โชคชัย ฟ้ารุ่งสาง", // exact Thai name
-		"GitCoFL",           // research paper
-		"InCIT 2025",        // conference
-		"LINE Corporation",  // current role
+		"GitCoFL",          // research paper
+		"InCIT 2025",       // conference
+		"LINE Corporation", // current role
 	}
 	for _, f := range facts {
 		if !contains(PortfolioPersonaInstruction, f) {

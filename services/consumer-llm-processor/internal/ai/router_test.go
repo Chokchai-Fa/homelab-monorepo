@@ -24,6 +24,142 @@ func (f *fakeProvider) Reply(_ context.Context, _ []store.Message, _ string, ima
 	return f.answer, f.err
 }
 
+// fakeStreamProvider streams a sequence of deltas, optionally failing after
+// emitting `emitBeforeErr` of them. It also satisfies Provider.Reply.
+type fakeStreamProvider struct {
+	name          string
+	deltas        []string
+	err           error
+	emitBeforeErr int
+	calls         int
+}
+
+func (f *fakeStreamProvider) Name() string { return f.name }
+
+func (f *fakeStreamProvider) Reply(_ context.Context, _ []store.Message, _ string, _ *Image) (string, error) {
+	full := ""
+	for _, d := range f.deltas {
+		full += d
+	}
+	return full, f.err
+}
+
+func (f *fakeStreamProvider) ReplyStream(_ context.Context, _ []store.Message, _ string, _ *Image, emit func(string) error) (string, error) {
+	f.calls++
+	full := ""
+	for i, d := range f.deltas {
+		if f.err != nil && i >= f.emitBeforeErr {
+			return full, f.err
+		}
+		full += d
+		if e := emit(d); e != nil {
+			return full, e
+		}
+	}
+	if f.err != nil {
+		return full, f.err
+	}
+	return full, nil
+}
+
+func TestRouteStreamEmitsDeltasAndReturnsFull(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "general"}
+	sp := &fakeStreamProvider{name: "g", deltas: []string{"He ", "works ", "at LINE."}}
+	r := newTestRouter(classifier, nil, []Provider{sp}, nil, nil, nil)
+
+	var got string
+	res, err := r.RouteStream(context.Background(), nil, "where?", func(d string) error {
+		got += d
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "He works at LINE." || res.Text != got {
+		t.Fatalf("emitted %q, result %q", got, res.Text)
+	}
+}
+
+func TestRouteStreamFallsBackBeforeFirstToken(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "general"}
+	failing := &fakeStreamProvider{name: "first", deltas: []string{"x"}, err: errors.New("429"), emitBeforeErr: 0}
+	ok := &fakeStreamProvider{name: "second", deltas: []string{"ok ", "answer"}}
+	r := newTestRouter(classifier, nil, []Provider{failing, ok}, nil, nil, nil)
+
+	var got string
+	res, err := r.RouteStream(context.Background(), nil, "hi", func(d string) error {
+		got += d
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected fallback to succeed, got %v", err)
+	}
+	if res.Text != "ok answer" || got != "ok answer" {
+		t.Fatalf("expected second provider's answer, got %q / %q", res.Text, got)
+	}
+	if ok.calls != 1 {
+		t.Fatalf("expected fallback provider to be called once, got %d", ok.calls)
+	}
+}
+
+func TestRouteStreamNoFallbackAfterPartialOutput(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "general"}
+	// Emits one delta, then fails - the router must NOT try the next provider.
+	failing := &fakeStreamProvider{name: "first", deltas: []string{"partial ", "more"}, err: errors.New("boom"), emitBeforeErr: 1}
+	next := &fakeStreamProvider{name: "second", deltas: []string{"should not run"}}
+	r := newTestRouter(classifier, nil, []Provider{failing, next}, nil, nil, nil)
+
+	var got string
+	_, err := r.RouteStream(context.Background(), nil, "hi", func(d string) error {
+		got += d
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error after partial output")
+	}
+	if got != "partial " {
+		t.Fatalf("expected only the partial delta, got %q", got)
+	}
+	if next.calls != 0 {
+		t.Fatal("must not fall back after streaming partial output")
+	}
+}
+
+func TestRouteStreamNonStreamProviderEmitsWhole(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "general"}
+	plain := &fakeProvider{name: "plain", answer: "whole answer"}
+	r := newTestRouter(classifier, nil, []Provider{plain}, nil, nil, nil)
+
+	var got string
+	res, err := r.RouteStream(context.Background(), nil, "hi", func(d string) error {
+		got += d
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "whole answer" || res.Text != "whole answer" {
+		t.Fatalf("expected whole answer emitted once, got %q / %q", got, res.Text)
+	}
+}
+
+func TestRouteStreamReminderShortCircuits(t *testing.T) {
+	classifier := &fakeProvider{name: "classifier", answer: "reminder"}
+	sp := &fakeStreamProvider{name: "g", deltas: []string{"nope"}}
+	r := newTestRouter(classifier, nil, []Provider{sp}, nil, nil, nil)
+
+	res, err := r.RouteStream(context.Background(), nil, "remind me", func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.ReminderIntent {
+		t.Fatal("expected reminder intent")
+	}
+	if sp.calls != 0 {
+		t.Fatal("providers must not run on a reminder intent")
+	}
+}
+
 type fakeImageGen struct {
 	data    []byte
 	caption string

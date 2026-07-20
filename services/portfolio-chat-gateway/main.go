@@ -132,18 +132,19 @@ func main() {
 		log.Error().Msg("startup: NATS_URL not set - chat requests will fail")
 	}
 
-	var requester handler.Requester
+	var backend handler.Backend
 	if nc != nil {
-		requester = nc
+		backend = &natsBackend{conn: nc}
 	}
-	h := handler.New(requester, config.RequestTimeout, config.MaxMessageChars)
+	h := handler.New(backend, config.RequestTimeout, config.MaxMessageChars)
 
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(middleware.Recover())
 
-	e.GET("/healthz", h.Healthz)
-	e.POST("/chat", h.Chat, middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
+	// One rate limiter shared by both chat entry points so a visitor can't
+	// dodge the budget by mixing streaming and non-streaming calls.
+	rateLimiter := middleware.RateLimiterWithConfig(middleware.RateLimiterConfig{
 		Store: middleware.NewRateLimiterMemoryStoreWithConfig(middleware.RateLimiterMemoryStoreConfig{
 			Rate:      rate.Limit(float64(config.RateLimitPerMin) / 60.0),
 			Burst:     config.RateLimitPerMin,
@@ -156,7 +157,12 @@ func main() {
 		DenyHandler: func(c echo.Context, _ string, _ error) error {
 			return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "slow down a little - try again in a minute"})
 		},
-	}))
+	})
+
+	e.GET("/healthz", h.Healthz)
+	e.GET("/status", h.Status)
+	e.POST("/chat", h.Chat, rateLimiter)
+	e.POST("/chat/stream", h.ChatStream, rateLimiter)
 
 	// Serve until signalled, then drain in-flight requests.
 	go func() {
@@ -177,3 +183,42 @@ func main() {
 		log.Error().Err(err).Msg("shutdown: server shutdown failed")
 	}
 }
+
+// natsBackend adapts *nats.Conn to handler.Backend: a unary request-reply and
+// a streaming open (fresh inbox + sync subscription the SSE handler drains).
+type natsBackend struct {
+	conn *nats.Conn
+}
+
+func (b *natsBackend) Request(subj string, data []byte, timeout time.Duration) (*nats.Msg, error) {
+	return b.conn.Request(subj, data, timeout)
+}
+
+func (b *natsBackend) Connected() bool { return b.conn.IsConnected() }
+
+func (b *natsBackend) OpenStream(subject string, payload []byte) (handler.StreamSub, error) {
+	inbox := b.conn.NewInbox()
+	sub, err := b.conn.SubscribeSync(inbox)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.conn.PublishRequest(subject, inbox, payload); err != nil {
+		_ = sub.Unsubscribe()
+		return nil, err
+	}
+	return &natsStreamSub{sub: sub}, nil
+}
+
+type natsStreamSub struct {
+	sub *nats.Subscription
+}
+
+func (s *natsStreamSub) Next(timeout time.Duration) ([]byte, error) {
+	msg, err := s.sub.NextMsg(timeout)
+	if err != nil {
+		return nil, err
+	}
+	return msg.Data, nil
+}
+
+func (s *natsStreamSub) Close() error { return s.sub.Unsubscribe() }

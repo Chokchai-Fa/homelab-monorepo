@@ -22,9 +22,15 @@ import (
 
 const (
 	// RequestSubject is the request-reply subject portfolio-chat-gateway
-	// calls with nc.Request.
+	// calls with nc.Request for a single, whole answer.
 	RequestSubject = "portfolio.chat.ai_request"
 	QueueGroup     = "consumer-llm-processor-web"
+
+	// RequestStreamSubject is the streaming subject: the gateway publishes a
+	// request with a reply inbox and this service pushes a series of
+	// StreamChunk frames to that inbox, ending with one {done:true}.
+	RequestStreamSubject = "portfolio.chat.ai_request.stream"
+	StreamQueueGroup     = "consumer-llm-processor-web-stream"
 
 	// userIDPrefix namespaces web sessions inside the shared conversation
 	// store so they can never collide with LINE user IDs.
@@ -57,9 +63,20 @@ type Response struct {
 }
 
 // Responder answers one question with conversation context; satisfied by
-// *ai.Router built with the portfolio persona.
+// *ai.Router built with the portfolio persona. Route returns the whole answer;
+// RouteStream emits it token-by-token through emit and returns the full text.
 type Responder interface {
 	Route(ctx context.Context, history []store.Message, userMessage string, image *ai.Image) (ai.Result, error)
+	RouteStream(ctx context.Context, history []store.Message, userMessage string, emit func(delta string) error) (ai.Result, error)
+}
+
+// StreamChunk is one frame the gateway receives on its reply inbox. A stream
+// is a sequence of {delta} frames terminated by a single {done:true}; Error
+// is set on the terminating frame when generation failed.
+type StreamChunk struct {
+	Delta string `json:"delta,omitempty"`
+	Done  bool   `json:"done,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // Consumer answers portfolio chat requests over NATS request-reply.
@@ -97,6 +114,119 @@ func (c *Consumer) Subscribe() (*nats.Subscription, error) {
 			}
 		}()
 	})
+}
+
+// SubscribeStream attaches the streaming consumer. Each request is answered on
+// its own goroutine, pushing StreamChunk frames to the request's reply inbox.
+func (c *Consumer) SubscribeStream() (*nats.Subscription, error) {
+	return c.nc.QueueSubscribe(RequestStreamSubject, StreamQueueGroup, func(msg *nats.Msg) {
+		if msg.Reply == "" {
+			log.Error().Str("subject", RequestStreamSubject).Msg("webchat: dropping stream request without reply inbox")
+			return
+		}
+		go c.handleStream(msg)
+	})
+}
+
+// handleStream wires one NATS streaming request into streamRespond: emit
+// publishes a delta frame to the reply inbox, done publishes the terminating
+// frame.
+func (c *Consumer) handleStream(msg *nats.Msg) {
+	ctx, cancel := context.WithTimeout(context.Background(), generateTimeout)
+	defer cancel()
+
+	emit := func(delta string) error {
+		return c.publishChunk(msg.Reply, StreamChunk{Delta: delta})
+	}
+	done := func(errText string) {
+		_ = c.publishChunk(msg.Reply, StreamChunk{Done: true, Error: errText})
+	}
+	c.streamRespond(ctx, msg.Data, emit, done)
+}
+
+// streamRespond is the transport-independent streaming logic: it validates the
+// raw request, streams the answer through emit as it is generated, and always
+// finishes by calling done exactly once (with a non-empty errText when
+// generation failed). Kept free of NATS so it can be unit-tested directly.
+func (c *Consumer) streamRespond(ctx context.Context, data []byte, emit func(delta string) error, done func(errText string)) {
+	var req Request
+	if err := json.Unmarshal(data, &req); err != nil {
+		log.Error().Err(err).Msg("webchat: failed to unmarshal stream request")
+		_ = emit("Sorry, I couldn't read that request.")
+		done("invalid request")
+		return
+	}
+	query := strings.TrimSpace(req.Message)
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" || query == "" {
+		_ = emit(usageHint)
+		done("")
+		return
+	}
+	if len([]rune(query)) > maxMessageChars {
+		_ = emit("That message is a bit too long - could you shorten it?")
+		done("message too long")
+		return
+	}
+
+	userID := userIDPrefix + sessionID
+	log.Info().Str("user_id", userID).Int("chars", len(query)).Msg("webchat: stream request received")
+
+	if isResetCommand(query) {
+		if err := c.store.Clear(ctx, userID); err != nil {
+			log.Error().Str("user_id", userID).Err(err).Msg("webchat: failed to clear history")
+			_ = emit("Sorry, I couldn't reset the conversation. Please try again.")
+			done("clear failed")
+			return
+		}
+		_ = emit(resetDone)
+		done("")
+		return
+	}
+
+	history, err := c.store.GetRecent(ctx, userID)
+	if err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("webchat: failed to load history - continuing without context")
+		history = nil
+	}
+
+	start := time.Now()
+	result, err := c.ai.RouteStream(ctx, history, query, emit)
+	if err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("webchat: stream llm request failed")
+		// If nothing was streamed yet the visitor has a blank bubble; give
+		// them the friendly fallback. (If a partial answer already streamed,
+		// we just end the stream - the error rides on the done frame.)
+		if result.Text == "" {
+			_ = emit(unavailableText)
+		}
+		done("llm failed")
+		return
+	}
+	if result.ReminderIntent || result.ImageData != nil {
+		_ = emit(offTopicText)
+		done("")
+		return
+	}
+	log.Info().Str("user_id", userID).Dur("duration", time.Since(start)).Int("answer_chars", len(result.Text)).Msg("webchat: stream answered")
+
+	if err := c.store.Append(ctx, userID, store.RoleUser, query); err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("webchat: failed to store user message")
+	}
+	if err := c.store.Append(ctx, userID, store.RoleModel, result.Text); err != nil {
+		log.Error().Str("user_id", userID).Err(err).Msg("webchat: failed to store model reply")
+	}
+	done("")
+}
+
+// publishChunk marshals and publishes one StreamChunk frame to the reply inbox.
+func (c *Consumer) publishChunk(inbox string, chunk StreamChunk) error {
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		log.Error().Err(err).Msg("webchat: failed to marshal stream chunk")
+		return err
+	}
+	return c.nc.Publish(inbox, data)
 }
 
 const (
