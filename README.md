@@ -14,8 +14,9 @@ a new tag matching `^v[0-9]+\.[0-9]+\.[0-9]+.*$` appears. This repo's job ends a
 
 ```
 build/            Shared, per-STACK Dockerfiles (reused across services)
-  go/Dockerfile         every Go service
-  node-next/Dockerfile  every Next.js (standalone) frontend
+  go/Dockerfile          every Go service
+  node-next/Dockerfile   every Next.js (standalone) frontend
+  docusaurus/Dockerfile  the docs site
 apps/             Frontend services (one dir each) + a VERSION file
 services/         Backend services (one dir each) + a VERSION file
 services.yaml     Service registry — single source of truth
@@ -51,9 +52,16 @@ newest build. Bump `VERSION` for a meaningful release.
 | Service | Stack | Image | Port | Notes |
 | --- | --- | --- | --- | --- |
 | `portfolio-web` | Next.js 14 (standalone) | `chokchaifa/chokchai-portfolio` | 3000 | migrated from `chokchai-portfolio` |
-| `line-webhook` | Go 1.23 (Echo) | `chokchaifa/line-webhook` | 8080 | needs `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` at runtime (k8s Secret in flux repo) |
-| `consumer-llm-processor` | Go 1.23 | `chokchaifa/consumer-llm-processor` | — | NATS consumer for Gemini-backed AI replies; needs `GEMINI_API_KEY` + `DATABASE_URL` |
-| `consumer-reply-line-user` | Go 1.23 | `chokchaifa/consumer-reply-line-user` | — | NATS consumer for LINE delivery; needs channel credentials |
+| `docs` | Docusaurus | `chokchaifa/docs` | 80 | this documentation site; `npm run build` fails the image on broken links or MDX errors |
+| `line-webhook` | Go 1.25 (Echo) | `chokchaifa/line-webhook` | 8080 | only HTTP ingress, never replies to LINE directly; needs `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` at runtime (k8s Secret in flux repo) |
+| `consumer-llm-processor` | Go 1.25 | `chokchaifa/consumer-llm-processor` | — | NATS consumer for LLM-backed AI replies (Gemini/Groq/OpenRouter/CF provider chain); needs `GEMINI_API_KEY` + `DATABASE_URL` |
+| `consumer-reply-line-user` | Go 1.25 | `chokchaifa/consumer-reply-line-user` | — | only egress; NATS consumer for LINE delivery (reply token first, push fallback); needs channel credentials |
+| `consumer-reminder` | Go 1.25 | `chokchaifa/consumer-reminder` | — | owns the reminder conversation flow + `line_users`/`reminders` tables; never calls an LLM |
+| `worker-reminder-scheduler` | Go 1.25 | `chokchaifa/worker-reminder-scheduler` | — | gocron loop; arms due reminders as Redis expiry keys, no NATS |
+| `subscriber-reminder-notifier` | Go 1.25 | `chokchaifa/subscriber-reminder-notifier` | — | fires on Redis key-expiry and publishes the reminder reply |
+
+See [docs.chokchai-dev.xyz](https://docs.chokchai-dev.xyz) for architecture,
+per-service env vars, and sequence diagrams.
 
 ## Required GitHub secrets
 
