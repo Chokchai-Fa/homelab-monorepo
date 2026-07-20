@@ -5,13 +5,15 @@ name: build-and-push
 # which auto-deploys any pushed tag matching ^v[0-9]+\.[0-9]+\.[0-9]+.*$
 #
 # Triggers:
-#   push (any branch)   -> build only the services whose files changed.
-#                          A merge/PR into main IS a push to main, so merging to
-#                          main fires this too and deploys the changed services.
+#   push (main only)    -> build only the services whose files changed.
+#                          A merge/PR into main IS a push to main, so merging
+#                          fires this and deploys the changed services. Other
+#                          branches never build-and-push: PRs run the separate
+#                          test workflow instead.
 #   workflow_dispatch   -> build on demand, no merge: pick branch/tag + service(s)
 on:
   push:
-    branches: ['**']   # includes main; a merge to main = push to main
+    branches: [main]   # a merge to main = push to main
   workflow_dispatch:
     inputs:
       services:
