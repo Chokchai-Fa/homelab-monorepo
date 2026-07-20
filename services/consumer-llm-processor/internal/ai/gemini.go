@@ -60,6 +60,50 @@ func (g *Gemini) Name() string { return g.name }
 // optional attached image, which Gemini models handle natively) and returns
 // the model's answer.
 func (g *Gemini) Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error) {
+	contents := g.buildContents(history, userMessage, image)
+
+	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, g.genConfig())
+	if err != nil {
+		return "", fmt.Errorf("generate content: %w", err)
+	}
+
+	text := resp.Text()
+	if text == "" {
+		return "", fmt.Errorf("empty response from model")
+	}
+	return text, nil
+}
+
+// ReplyStream streams the answer token-by-token, calling emit with each
+// delta, and returns the full concatenated text. It satisfies StreamProvider.
+func (g *Gemini) ReplyStream(ctx context.Context, history []store.Message, userMessage string, image *Image, emit func(delta string) error) (string, error) {
+	contents := g.buildContents(history, userMessage, image)
+
+	var full string
+	for resp, err := range g.client.Models.GenerateContentStream(ctx, g.model, contents, g.genConfig()) {
+		if err != nil {
+			// Fail with what we have so the router can decide whether it is
+			// safe to fall back (only when nothing was emitted yet).
+			return full, fmt.Errorf("generate content stream: %w", err)
+		}
+		delta := resp.Text()
+		if delta == "" {
+			continue
+		}
+		full += delta
+		if err := emit(delta); err != nil {
+			return full, err
+		}
+	}
+	if full == "" {
+		return "", fmt.Errorf("empty response from model")
+	}
+	return full, nil
+}
+
+// buildContents assembles the genai contents from history + the new message
+// (plus an optional image), shared by Reply and ReplyStream.
+func (g *Gemini) buildContents(history []store.Message, userMessage string, image *Image) []*genai.Content {
 	contents := make([]*genai.Content, 0, len(history)+1)
 	for _, m := range history {
 		contents = append(contents, genai.NewContentFromText(m.Content, genai.Role(m.Role)))
@@ -73,20 +117,14 @@ func (g *Gemini) Reply(ctx context.Context, history []store.Message, userMessage
 	} else {
 		contents = append(contents, genai.NewContentFromText(userMessage, genai.RoleUser))
 	}
+	return contents
+}
 
-	resp, err := g.client.Models.GenerateContent(ctx, g.model, contents, &genai.GenerateContentConfig{
+func (g *Gemini) genConfig() *genai.GenerateContentConfig {
+	return &genai.GenerateContentConfig{
 		SystemInstruction: genai.NewContentFromText(g.system, genai.RoleUser),
 		// Gemini 3.5 guidance: steer latency with thinking level, leave
 		// temperature/top_p at their defaults.
 		ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: g.thinking},
-	})
-	if err != nil {
-		return "", fmt.Errorf("generate content: %w", err)
 	}
-
-	text := resp.Text()
-	if text == "" {
-		return "", fmt.Errorf("empty response from model")
-	}
-	return text, nil
 }

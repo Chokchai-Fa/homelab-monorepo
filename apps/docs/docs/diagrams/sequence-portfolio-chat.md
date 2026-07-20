@@ -82,3 +82,48 @@ sequenceDiagram
 - **Timeouts:** the gateway's request timeout sits *above* the consumer's own
   generate timeout, so a slow provider chain still yields a friendly answer
   rather than a bare gateway `504`.
+
+## Streaming variant (the default)
+
+The diagram above is the unary `POST /chat`. The widget actually defaults to the
+**streaming** endpoint, which changes only the transport, not the pipeline:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant B as Browser widget
+  participant PW as portfolio-web (/api/chat/stream)
+  participant GW as portfolio-chat-gateway
+  participant N as NATS
+  participant P as consumer-llm-processor
+  participant X as LLM provider
+
+  B->>PW: POST /api/chat/stream (fetch, reads a stream)
+  PW->>GW: POST /chat/stream
+  GW->>N: publish portfolio.chat.ai_request.stream (reply = inbox)
+  N->>P: deliver on stream queue group
+  loop each token
+    P->>X: stream tokens
+    X-->>P: delta
+    P-->>N: {delta} to inbox
+    N-->>GW: {delta}
+    GW-->>PW: SSE data: {delta}
+    PW-->>B: SSE data: {delta}
+    B->>B: append token
+  end
+  P-->>N: {done:true}
+  N-->>GW: {done:true}
+  GW-->>PW: SSE data: {done:true}
+  PW-->>B: close stream
+```
+
+- **Reply inbox, not request-reply:** the gateway publishes with a fresh inbox
+  as the reply subject and drains `StreamChunk` frames from it, forwarding each
+  as an SSE `data:` line; the stream ends on the `{done:true}` frame.
+- **Fallback only before the first token:** the router may still switch
+  providers on an early failure, but once any delta has been streamed the answer
+  is committed — a later failure ends the stream (a terminating frame carries
+  the error) rather than restarting on another model.
+- **Same store & persona:** history keying (`web:<sessionId>`), the portfolio
+  persona, and the image/reminder redirect are identical to the unary path;
+  only the delivery is incremental.

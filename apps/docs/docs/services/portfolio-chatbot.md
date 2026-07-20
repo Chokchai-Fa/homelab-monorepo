@@ -42,30 +42,62 @@ answer travels straight back to the waiting gateway. This is the single
 architectural difference from the LINE flow; everything downstream (classifier,
 provider chains, conversation memory) is identical.
 
+## Streaming (SSE)
+
+By default the widget uses the **streaming** path so the answer renders
+token-by-token instead of appearing all at once after a pause — the biggest
+perceived-latency win for a chat UI.
+
+Because NATS request-reply is single-response, streaming uses a slightly
+different NATS shape: the gateway opens a **reply inbox** and publishes on
+`portfolio.chat.ai_request.stream` with that inbox as the reply subject; the
+consumer streams the LLM's output as a series of `StreamChunk` frames
+(`{delta}` … `{done:true}`) to the inbox. The gateway forwards each frame to
+the browser as a **Server-Sent Event** (`text/event-stream`), and the widget
+appends each delta as it arrives.
+
+- **Provider streaming:** Gemini (`GenerateContentStream`) and the
+  OpenAI-compatible providers (Groq/OpenRouter, `stream:true` SSE) stream
+  natively; any provider without streaming support is emitted as a single
+  delta, so the path works for every provider.
+- **Fallback safety:** the difficulty router still falls back to the next
+  provider on failure, but **only before the first token is emitted**. Once the
+  visitor has seen partial output the answer is committed to that provider — a
+  mid-stream failure ends the stream rather than silently restarting on a
+  different model.
+- **Unary path kept:** `POST /chat` (whole-answer request-reply) remains for
+  non-streaming callers and as a fallback contract.
+
 ## Components
 
 ### portfolio-web
 The Next.js portfolio site. Two chat-related pieces:
 
-- **`components/chat/ChatWidget.tsx`** — a floating client-side widget
-  (suggested-question chips, typing indicator, "clear chat"). It generates a
-  session UUID once and keeps it in `localStorage`.
-- **`app/api/chat/route.ts`** — a same-origin **route handler** that proxies the
-  widget's POST to the gateway's in-cluster URL (`CHAT_GATEWAY_URL`). Keeping the
-  call server-side means the gateway needs no public hostname and there is no
-  CORS. It forwards `CF-Connecting-IP` so the gateway rate-limits the real
-  visitor, not the portfolio-web pod.
+- **`components/chat/ChatWidget.tsx`** — a floating client-side widget:
+  streaming (token-by-token) answers, **Markdown rendering** (bold, lists,
+  fenced code blocks), suggested-question chips, a first-visit **discovery
+  nudge**, a live **"answered from my homelab" status dot**, and "clear chat".
+  It generates a session UUID once and keeps it in `localStorage`.
+- **Route handlers** (same-origin proxies to the gateway's in-cluster URL
+  `CHAT_GATEWAY_URL`, keeping the gateway private with no CORS; all forward
+  `CF-Connecting-IP` so rate limiting sees the real visitor):
+  - `app/api/chat/stream/route.ts` — pipes the gateway's SSE stream through
+    unbuffered (the default path).
+  - `app/api/chat/route.ts` — the unary whole-answer proxy.
+  - `app/api/chat/status/route.ts` — proxies `GET /status` for the status card.
 
 ### portfolio-chat-gateway
 A small Go/Echo service — the web channel's **ingress and egress in one**. It:
 
-- exposes `POST /chat` (`{session_id, message}` → `{text}`) and `GET /healthz`;
+- exposes `POST /chat/stream` (SSE, the default), `POST /chat` (whole answer),
+  `GET /status` (live homelab health for the widget card), and `GET /healthz`;
 - **validates** the session id shape and message size, and **rate-limits per
-  visitor IP** (token bucket, default 10/min) to protect the free-tier LLM
-  quotas behind it;
-- relays each accepted message over NATS request-reply and maps failures to
-  clean HTTP codes: `400` invalid input, `429` rate-limited, `503` NATS
-  unavailable, `504` the pipeline took too long.
+  visitor IP** (one token bucket shared by both chat endpoints, default 10/min)
+  to protect the free-tier LLM quotas behind it;
+- relays each accepted message over NATS and maps failures to clean HTTP codes:
+  `400` invalid input, `429` rate-limited, `503` NATS unavailable, `504` the
+  pipeline took too long (streaming failures after the SSE stream has opened
+  arrive as a terminating error frame instead).
 
 It is **ClusterIP-only** — portfolio-web's `/api/chat` proxy is its sole caller,
 so it never faces the public internet and stays off the cloudflared tunnel.

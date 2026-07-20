@@ -102,6 +102,77 @@ func (r *Router) Route(ctx context.Context, history []store.Message, userMessage
 	return Result{}, fmt.Errorf("all providers failed for tier %q", label)
 }
 
+// RouteStream is the streaming counterpart of Route: it classifies the
+// message, then streams the tier chain's answer through emit token-by-token,
+// returning the full text in Result. Provider fallback is preserved but
+// constrained: once any token has been emitted to the caller the answer is
+// committed to that provider, so a provider that fails mid-stream returns the
+// error instead of silently restarting on another model. A provider that
+// fails before emitting anything (e.g. an immediate 429) still falls back.
+//
+// Images and image-generation are not supported on the streaming path (the
+// web channel is text-only); a reminder intent short-circuits like Route.
+func (r *Router) RouteStream(ctx context.Context, history []store.Message, userMessage string, emit func(delta string) error) (Result, error) {
+	tier := r.classify(ctx, userMessage)
+	if tier == TierReminder {
+		return Result{ReminderIntent: true}, nil
+	}
+	// No generator on this path: an image ask is answered as text.
+	if tier == TierImage {
+		tier = TierGeneral
+	}
+	chain := r.chains[tier]
+	label := string(tier)
+
+	var emitted int
+	guardedEmit := func(delta string) error {
+		emitted += len(delta)
+		return emit(delta)
+	}
+
+	var lastErr error
+	for _, p := range chain {
+		full, err := streamOne(ctx, p, history, userMessage, guardedEmit)
+		if err == nil {
+			log.Info().Str("tier", label).Str("provider", p.Name()).Bool("streamed", isStream(p)).Msg("route: streamed answer")
+			return Result{Text: full}, nil
+		}
+		lastErr = err
+		if emitted > 0 {
+			// Already streamed partial output - can't switch providers now.
+			log.Error().Str("tier", label).Str("provider", p.Name()).Err(err).Msg("route: stream failed after partial output - aborting")
+			return Result{}, err
+		}
+		log.Warn().Str("tier", label).Str("provider", p.Name()).Err(err).Msg("route: stream provider failed before output - trying next")
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no providers configured for tier %q", label)
+	}
+	return Result{}, fmt.Errorf("all providers failed for tier %q: %w", label, lastErr)
+}
+
+// streamOne streams a single provider's answer. A StreamProvider streams
+// natively; any other Provider is called once and its whole answer emitted as
+// a single delta, so the streaming path works with every provider.
+func streamOne(ctx context.Context, p Provider, history []store.Message, userMessage string, emit func(delta string) error) (string, error) {
+	if sp, ok := p.(StreamProvider); ok {
+		return sp.ReplyStream(ctx, history, userMessage, nil, emit)
+	}
+	full, err := p.Reply(ctx, history, userMessage, nil)
+	if err != nil {
+		return "", err
+	}
+	if err := emit(full); err != nil {
+		return full, err
+	}
+	return full, nil
+}
+
+func isStream(p Provider) bool {
+	_, ok := p.(StreamProvider)
+	return ok
+}
+
 func (r *Router) generateImage(ctx context.Context, prompt string) (Result, error) {
 	start := time.Now()
 	data, mime, caption, err := r.imageGen.Generate(ctx, prompt)

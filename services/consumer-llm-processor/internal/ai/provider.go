@@ -21,6 +21,17 @@ type Provider interface {
 	Reply(ctx context.Context, history []store.Message, userMessage string, image *Image) (string, error)
 }
 
+// StreamProvider is a Provider that can emit its answer incrementally. emit
+// is called with each new text delta as it arrives; the full concatenated
+// answer is also returned. A provider that doesn't implement this is still
+// usable in a streaming route - the router just emits its whole Reply as one
+// delta. emit returning an error (e.g. the client disconnected) aborts
+// generation.
+type StreamProvider interface {
+	Provider
+	ReplyStream(ctx context.Context, history []store.Message, userMessage string, image *Image, emit func(delta string) error) (string, error)
+}
+
 // PersonaInstruction is the shared system prompt so Mio sounds the same no
 // matter which provider answers.
 const PersonaInstruction = `You are "Umaru" (อุมารุ), a sassy anime girl chatting with users on the LINE messaging app.
