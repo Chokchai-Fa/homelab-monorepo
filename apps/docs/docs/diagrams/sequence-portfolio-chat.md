@@ -29,7 +29,7 @@ sequenceDiagram
   B->>CF: POST /api/chat (same-origin, sessionId)
   CF->>PW: forward
   PW->>GW: POST /chat (forwards CF-Connecting-IP)
-  GW->>GW: validate session_id + size; rate-limit per IP
+  GW->>GW: validate session_id + size, rate-limit per IP
   alt invalid or over rate limit
     GW-->>PW: 400 / 429
     PW-->>B: error bubble
