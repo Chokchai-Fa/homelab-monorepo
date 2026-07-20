@@ -28,7 +28,8 @@ scripts/          select-services.sh — change detection + build matrix
 
 | Trigger | What builds |
 | --- | --- |
-| **Push / merge to any branch** | Only services whose files changed (change detection) |
+| **Push / merge to `main`** | Only services whose files changed (change detection) |
+| **Pull request to `main`** | Nothing — the *test* workflow runs `go vet` + unit tests for every service instead |
 | **Manual run** (Actions → *build-and-push* → *Run workflow*) | Pick a branch/tag + `all` or specific service(s) — **no merge needed** |
 
 Every build pushes `docker.io/chokchaifa/<image>:v<VERSION>-<run>.<shortsha>`,
