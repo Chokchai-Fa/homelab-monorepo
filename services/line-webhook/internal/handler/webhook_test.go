@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +49,13 @@ func TestIsAIRequest(t *testing.T) {
 	}
 }
 
+// fakePublisher is not safe for concurrent Publish* calls in general, but
+// ensureProfile does publish from a background goroutine (see
+// TestEnsureProfile* in webhook_extra_test.go), so every method guards the
+// slices with a mutex; tests that read the slices while such a goroutine
+// may still be running should go through the *Snapshot helpers below.
 type fakePublisher struct {
+	mu         sync.Mutex
 	aiRequests []publisher.AIRequestEvent
 	replies    []publisher.ReplyEvent
 	postbacks  []publisher.PostbackEvent
@@ -56,23 +63,42 @@ type fakePublisher struct {
 }
 
 func (f *fakePublisher) PublishAIRequest(e publisher.AIRequestEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.aiRequests = append(f.aiRequests, e)
 	return nil
 }
 
 func (f *fakePublisher) PublishReply(e publisher.ReplyEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.replies = append(f.replies, e)
 	return nil
 }
 
 func (f *fakePublisher) PublishPostback(e publisher.PostbackEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.postbacks = append(f.postbacks, e)
 	return nil
 }
 
 func (f *fakePublisher) PublishProfile(e publisher.ProfileEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.profiles = append(f.profiles, e)
 	return nil
+}
+
+// profilesSnapshot returns a copy of the published profile events, safe to
+// call while a background goroutine (e.g. ensureProfile) may still be
+// publishing.
+func (f *fakePublisher) profilesSnapshot() []publisher.ProfileEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]publisher.ProfileEvent, len(f.profiles))
+	copy(out, f.profiles)
+	return out
 }
 
 type fakeSessions struct {
