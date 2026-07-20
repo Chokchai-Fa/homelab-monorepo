@@ -28,8 +28,16 @@ type UserStore interface {
 	UpsertUser(ctx context.Context, userID, displayName string) error
 }
 
+// Flow is the subset of *flow.Flow the consumer drives. Extracted as an
+// interface (rather than depending on *flow.Flow directly) so the message
+// handlers below can be unit tested with a fake, without a live NATS/Redis.
+type Flow interface {
+	HandleRequest(ctx context.Context, ev events.ReminderRequestEvent)
+	HandlePostback(ctx context.Context, ev events.PostbackEvent)
+}
+
 type Consumer struct {
-	flow  *flow.Flow
+	flow  Flow
 	users UserStore
 }
 
@@ -42,68 +50,81 @@ func New(f *flow.Flow, users UserStore) *Consumer {
 func (c *Consumer) Subscribe(nc *nats.Conn) ([]*nats.Subscription, error) {
 	var subs []*nats.Subscription
 
-	sub, err := nc.QueueSubscribe(events.ReminderRequestSubject, QueueGroup, func(msg *nats.Msg) {
-		var ev events.ReminderRequestEvent
-		if err := json.Unmarshal(msg.Data, &ev); err != nil {
-			log.Error().Str("subject", events.ReminderRequestSubject).Err(err).Msg("consume: bad reminder request")
-			return
-		}
-		if ev.UserID == "" {
-			log.Error().Str("subject", events.ReminderRequestSubject).Msg("consume: dropping request without user_id")
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
-		defer cancel()
-		log.Info().Str("user_id", ev.UserID).Msg("consume: reminder request received")
-		c.flow.HandleRequest(ctx, ev)
-	})
+	sub, err := nc.QueueSubscribe(events.ReminderRequestSubject, QueueGroup, c.handleReminderRequestMsg)
 	if err != nil {
 		return nil, err
 	}
 	subs = append(subs, sub)
 
-	sub, err = nc.QueueSubscribe(events.PostbackSubject, QueueGroup, func(msg *nats.Msg) {
-		var ev events.PostbackEvent
-		if err := json.Unmarshal(msg.Data, &ev); err != nil {
-			log.Error().Str("subject", events.PostbackSubject).Err(err).Msg("consume: bad postback")
-			return
-		}
-		if ev.UserID == "" {
-			log.Error().Str("subject", events.PostbackSubject).Msg("consume: dropping postback without user_id")
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
-		defer cancel()
-		log.Info().Str("user_id", ev.UserID).Str("data", ev.Data).Msg("consume: postback received")
-		c.flow.HandlePostback(ctx, ev)
-	})
+	sub, err = nc.QueueSubscribe(events.PostbackSubject, QueueGroup, c.handlePostbackMsg)
 	if err != nil {
 		return nil, err
 	}
 	subs = append(subs, sub)
 
-	sub, err = nc.QueueSubscribe(events.ProfileSubject, QueueGroup, func(msg *nats.Msg) {
-		var ev events.ProfileEvent
-		if err := json.Unmarshal(msg.Data, &ev); err != nil {
-			log.Error().Str("subject", events.ProfileSubject).Err(err).Msg("consume: bad profile event")
-			return
-		}
-		if ev.UserID == "" || ev.DisplayName == "" {
-			log.Error().Str("subject", events.ProfileSubject).Msg("consume: dropping incomplete profile event")
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
-		defer cancel()
-		if err := c.users.UpsertUser(ctx, ev.UserID, ev.DisplayName); err != nil {
-			log.Error().Str("user_id", ev.UserID).Err(err).Msg("consume: profile upsert failed")
-			return
-		}
-		log.Info().Str("user_id", ev.UserID).Str("display_name", ev.DisplayName).Msg("consume: profile upserted")
-	})
+	sub, err = nc.QueueSubscribe(events.ProfileSubject, QueueGroup, c.handleProfileMsg)
 	if err != nil {
 		return nil, err
 	}
 	subs = append(subs, sub)
 
 	return subs, nil
+}
+
+// handleReminderRequestMsg unmarshals and validates a reminder-request
+// message, then hands it to the flow. Split out from Subscribe so the
+// parsing/validation/routing logic is unit-testable without a NATS
+// connection: a *nats.Msg is a plain struct, no subscription required.
+func (c *Consumer) handleReminderRequestMsg(msg *nats.Msg) {
+	var ev events.ReminderRequestEvent
+	if err := json.Unmarshal(msg.Data, &ev); err != nil {
+		log.Error().Str("subject", events.ReminderRequestSubject).Err(err).Msg("consume: bad reminder request")
+		return
+	}
+	if ev.UserID == "" {
+		log.Error().Str("subject", events.ReminderRequestSubject).Msg("consume: dropping request without user_id")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
+	defer cancel()
+	log.Info().Str("user_id", ev.UserID).Msg("consume: reminder request received")
+	c.flow.HandleRequest(ctx, ev)
+}
+
+// handlePostbackMsg is handleReminderRequestMsg's counterpart for postbacks.
+func (c *Consumer) handlePostbackMsg(msg *nats.Msg) {
+	var ev events.PostbackEvent
+	if err := json.Unmarshal(msg.Data, &ev); err != nil {
+		log.Error().Str("subject", events.PostbackSubject).Err(err).Msg("consume: bad postback")
+		return
+	}
+	if ev.UserID == "" {
+		log.Error().Str("subject", events.PostbackSubject).Msg("consume: dropping postback without user_id")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
+	defer cancel()
+	log.Info().Str("user_id", ev.UserID).Str("data", ev.Data).Msg("consume: postback received")
+	c.flow.HandlePostback(ctx, ev)
+}
+
+// handleProfileMsg is handleReminderRequestMsg's counterpart for profile
+// events, upserting into the user store instead of driving the flow.
+func (c *Consumer) handleProfileMsg(msg *nats.Msg) {
+	var ev events.ProfileEvent
+	if err := json.Unmarshal(msg.Data, &ev); err != nil {
+		log.Error().Str("subject", events.ProfileSubject).Err(err).Msg("consume: bad profile event")
+		return
+	}
+	if ev.UserID == "" || ev.DisplayName == "" {
+		log.Error().Str("subject", events.ProfileSubject).Msg("consume: dropping incomplete profile event")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
+	defer cancel()
+	if err := c.users.UpsertUser(ctx, ev.UserID, ev.DisplayName); err != nil {
+		log.Error().Str("user_id", ev.UserID).Err(err).Msg("consume: profile upsert failed")
+		return
+	}
+	log.Info().Str("user_id", ev.UserID).Str("display_name", ev.DisplayName).Msg("consume: profile upserted")
 }

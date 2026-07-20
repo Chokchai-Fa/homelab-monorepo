@@ -1,0 +1,77 @@
+name: test
+
+# Run unit tests for every service on pull requests targeting main.
+# Standalone from build-and-push.yml: no Docker build/push, no Docker Hub
+# secrets needed, so it also runs cleanly on PRs from forks.
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select services
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      count: ${{ steps.select.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache yq
+        id: cache-yq
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/yq
+          key: yq-4.44.3-linux-amd64
+
+      - name: Install yq
+        if: steps.cache-yq.outputs.cache-hit != 'true'
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Select all services -> test matrix
+        id: select
+        env:
+          EVENT_NAME: workflow_dispatch
+          INPUT_SERVICES: all
+        run: bash scripts/select-services.sh
+
+  test:
+    name: Test ${{ matrix.name }}
+    needs: select
+    if: ${{ needs.select.outputs.count != '0' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: ${{ matrix.test != '' && startsWith(matrix.test, 'go') }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.context }}/go.mod
+          cache-dependency-path: ${{ matrix.context }}/go.sum
+
+      - name: Set up Node
+        if: ${{ matrix.test != '' && contains(matrix.test, 'npm') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: go vet
+        if: ${{ matrix.test != '' && startsWith(matrix.test, 'go') }}
+        working-directory: ${{ matrix.context }}
+        run: go vet ./...
+
+      - name: Run tests
+        if: ${{ matrix.test != '' }}
+        working-directory: ${{ matrix.context }}
+        run: ${{ matrix.test }}
