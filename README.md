@@ -55,7 +55,8 @@ newest build. Bump `VERSION` for a meaningful release.
 | `portfolio-web` | Next.js 14 (standalone) | `chokchaifa/chokchai-portfolio` | 3000 | migrated from `chokchai-portfolio` |
 | `docs` | Docusaurus | `chokchaifa/docs` | 80 | this documentation site; `npm run build` fails the image on broken links or MDX errors |
 | `line-webhook` | Go 1.25 (Echo) | `chokchaifa/line-webhook` | 8080 | only HTTP ingress, never replies to LINE directly; needs `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` at runtime (k8s Secret in flux repo) |
-| `consumer-llm-processor` | Go 1.25 | `chokchaifa/consumer-llm-processor` | — | NATS consumer for LLM-backed AI replies (Gemini/Groq/OpenRouter/CF provider chain); needs `GEMINI_API_KEY` + `DATABASE_URL` |
+| `consumer-llm-processor` | Go 1.25 | `chokchaifa/consumer-llm-processor` | — | NATS consumer for LLM-backed AI replies (Gemini/Groq/OpenRouter/CF provider chain); needs `GEMINI_API_KEY` + `DATABASE_URL`; also serves the portfolio chat channel via request-reply |
+| `portfolio-chat-gateway` | Go 1.25 (Echo) | `chokchaifa/portfolio-chat-gateway` | 8081 | HTTP entry for the portfolio site's chat widget; rate-limits and relays to consumer-llm-processor over NATS request-reply; ClusterIP-only (called by portfolio-web's `/api/chat` proxy) |
 | `consumer-reply-line-user` | Go 1.25 | `chokchaifa/consumer-reply-line-user` | — | only egress; NATS consumer for LINE delivery (reply token first, push fallback); needs channel credentials |
 | `consumer-reminder` | Go 1.25 | `chokchaifa/consumer-reminder` | — | owns the reminder conversation flow + `line_users`/`reminders` tables; never calls an LLM |
 | `worker-reminder-scheduler` | Go 1.25 | `chokchaifa/worker-reminder-scheduler` | — | gocron loop; arms due reminders as Redis expiry keys, no NATS |

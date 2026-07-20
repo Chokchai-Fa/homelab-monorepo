@@ -16,6 +16,12 @@ This service is the AI worker in the LINE chat pipeline. It subscribes to NATS e
 - Fetches image bytes line-webhook stashed in Redis (`internal/imagecache`) when the request carries an `image_key`, deletes them once read, and stores only a text placeholder in conversation history
 - Publishes the final reply to `line.chat.reply`
 - Supports simple conversation controls such as `/reset` and empty-query guidance
+- Also serves the portfolio website's chat widget: a second, request-reply
+  subscription on `portfolio.chat.ai_request` (called by
+  `portfolio-chat-gateway`) that reuses the same provider chains and
+  conversation store with a professional portfolio persona. Web sessions are
+  stored as `web:<session_id>`; debouncing, reminders and images are
+  LINE-only and skipped on this channel
 
 ## Runtime dependencies
 
