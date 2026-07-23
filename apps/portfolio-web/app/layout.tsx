@@ -6,6 +6,7 @@ import ChatWidget from "@/components/chat/ChatWidget";
 
 import PageTransition from "@/components/PageTransition";
 import StairTransition from "@/components/StairTransition";
+import { site, siteUrl, structuredData } from "@/lib/site";
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
@@ -14,13 +15,47 @@ const jetbrainsMono = JetBrains_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Chokchai Portfolio",
-  description: "Software Engineer specializing in scalable solutions across financial, insurance, and social network domains",
+  metadataBase: new URL(siteUrl),
+  title: {
+    default: site.title,
+    // Per-page titles render as "About | Chokchai Faroongsarng".
+    template: `%s | ${site.shortName === "Chokchai" ? "Chokchai Faroongsarng" : site.shortName}`,
+  },
+  description: site.description,
+  keywords: [...site.keywords],
+  authors: [{ name: "Chokchai Faroongsarng", url: siteUrl }],
+  creator: "Chokchai Faroongsarng",
+  applicationName: site.name,
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website",
+    url: siteUrl,
+    siteName: site.name,
+    title: site.title,
+    description: site.description,
+    locale: site.locale,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: site.title,
+    description: site.description,
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true, "max-image-preview": "large", "max-snippet": -1 },
+  },
+  // Set GOOGLE_SITE_VERIFICATION in the deployment to auto-emit the Search
+  // Console verification meta tag (no code change needed).
+  verification: process.env.GOOGLE_SITE_VERIFICATION
+    ? { google: process.env.GOOGLE_SITE_VERIFICATION }
+    : undefined,
 };
 
 export const viewport = {
   width: 'device-width',
   initialScale: 1,
+  themeColor: "#1c1c22",
 };
 
 export default function RootLayout({
@@ -33,6 +68,11 @@ export default function RootLayout({
       <body
         className={jetbrainsMono.variable}
       >
+        {/* Structured data (Person + WebSite) for rich results. */}
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData()) }}
+        />
         <Header />
         <StairTransition />
         <PageTransition>
