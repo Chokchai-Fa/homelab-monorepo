@@ -185,12 +185,12 @@ const Work = (): JSX.Element => {
             whileInView="animate"
             viewport={{ once: true, amount: 0.1 }}
           >
-            <motion.h3 
+            <motion.h1
               className="text-4xl font-bold"
               variants={fadeInUp}
             >
               Career <span className="text-accent">Overview</span>
-            </motion.h3>
+            </motion.h1>
             
             <motion.div 
               className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
