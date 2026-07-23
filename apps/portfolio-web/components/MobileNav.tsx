@@ -42,10 +42,11 @@ const MobileNav = (): JSX.Element => {
             
             <SheetContent className='flex flex-col'>
                 <div className='mt-32 mb-40 text-center text-2xl'>
-                    <Link href="/" onClick={handleLinkClick}>
-                        <h1 className='text-4xl font-semibold'>
+                    <Link href="/" onClick={handleLinkClick} aria-label="Chokchai — home">
+                        {/* Brand wordmark, not a page heading. */}
+                        <span className='block text-4xl font-semibold'>
                             Chokchai<span className='text-accent'>.</span>
-                        </h1>
+                        </span>
                     </Link>
                 </div>
 

@@ -10,7 +10,11 @@ import { site, siteUrl, structuredData } from "@/lib/site";
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
-  weight: ["100", "200", "300", "400", "500", "600", "700", "800"],
+  // Only the weights the UI actually uses: 400 (body), 500 (font-medium),
+  // 600 (font-semibold, incl. .h1/.h2/.h3), 700 (font-bold). Dropping the
+  // unused 100/200/300/800 halves the font payload.
+  weight: ["400", "500", "600", "700"],
+  display: 'swap',
   variable: '--font-jetbrainsMono'
 })
 

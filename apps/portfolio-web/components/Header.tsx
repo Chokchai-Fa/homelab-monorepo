@@ -8,10 +8,11 @@ const Header = (): JSX.Element => {
     <header className='py-8 xl:py-12 text-white'>
       <div className='container mx-auto flex justify-between items-center'>
         {/* logo */}
-        <Link href='/'>
-          <h1 className='text-4xl font-semibold'>
+        <Link href='/' aria-label='Chokchai — home'>
+          {/* Brand wordmark, not a page heading (keeps one <h1> per page). */}
+          <span className='block text-4xl font-semibold'>
             Chokchai<span className='text-accent'>.</span>
-          </h1>
+          </span>
         </Link>
         {/* desktop nav */}
         <div className='hidden xl:flex item-center gap-8'>

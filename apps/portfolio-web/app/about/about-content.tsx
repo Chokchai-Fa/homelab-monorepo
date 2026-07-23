@@ -261,7 +261,7 @@ const About = (): JSX.Element => {
                 className="flex flex-col gap-4"
                 variants={fadeInUp}
               >
-                <h2 className="h2 text-accent">About Me</h2>
+                <h1 className="h2 text-accent">About Me</h1>
                 <div className="w-[100px] h-[2px] bg-accent mx-auto xl:mx-0"></div>
               </motion.div>
               <div className="flex flex-col xl:flex-row gap-[30px] items-center xl:items-start">

@@ -23,9 +23,14 @@ const Photo = (): JSX.Element => {
                     className="w-[298px] h-[298px] xl:w-[498px] xl:h-[498px] mix-blend-lighten absolute">
                     <Image
                         src={PhotoUrl}
-                        priority quality={100}
+                        priority
+                        quality={90}
                         fill
-                        alt=""
+                        // sizes lets Next serve a right-sized image for a fill
+                        // container (498px on xl, 298px below) instead of the
+                        // largest candidate.
+                        sizes="(min-width: 1280px) 498px, 298px"
+                        alt="Chokchai Faroongsarng"
                         className="object-cover rounded-full"
                     />
                 </motion.div>
