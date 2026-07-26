@@ -13,7 +13,7 @@ persistent volume.
 
 | Property | Value |
 |----------|-------|
-| Image | `postgres:15-alpine` |
+| Image | `pgvector/pgvector:pg15` (PostgreSQL 15 + the `vector` extension) |
 | Workload | **StatefulSet**, `replicas: 1`, `serviceName: postgres-headless` |
 | Persistence | PVC `postgres-data`, **5 Gi**, `local-path`, `ReadWriteOnce`, mounted at `/var/lib/postgresql/data` |
 | Port | `5432` |

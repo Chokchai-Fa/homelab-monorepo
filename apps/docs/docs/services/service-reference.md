@@ -46,10 +46,13 @@ datastore of its own.
 The AI brain, shared by both channels: classify → route to a provider chain →
 answer, with conversation memory and image generation. Detects reminder intent
 and hands off. Serves the LINE `ai_request` subject (fire-and-forget) **and** the
-web `portfolio.chat.ai_request` subject (request-reply, professional portfolio
-persona, history keyed `web:<session_id>`).
-- **Env:** `NATS_*`, `DATABASE_URL`, `REDIS_*`, `GEMINI_API_KEY`, `GEMINI_MODEL` (`gemini-3.1-flash-lite`), optional `GROQ_API_KEY`/`GROQ_MODEL`/`GROQ_CLASSIFIER_MODEL`, `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`/`OPENROUTER_VISION_MODEL`, `CF_ACCOUNT_ID`/`CF_API_TOKEN`/`CF_IMAGE_MODEL`, `DEBOUNCE_WINDOW` (5s), `DEBOUNCE_MAX_WAIT` (15s).
-- **Owns:** `line_ai_messages` (shared by LINE users and `web:` sessions).
+web `portfolio.chat.ai_request` subject (request-reply + a streaming variant,
+professional portfolio persona, history keyed `web:<session_id>`). The web
+channel can optionally use **RAG** (`internal/knowledge`): a curated corpus is
+embedded into a pgvector table and the top matches are injected per question;
+off by default and degrades to persona-only when unavailable.
+- **Env:** `NATS_*`, `DATABASE_URL`, `REDIS_*`, `GEMINI_API_KEY`, `GEMINI_MODEL` (`gemini-3.1-flash-lite`), optional `GROQ_API_KEY`/`GROQ_MODEL`/`GROQ_CLASSIFIER_MODEL`, `OPENROUTER_API_KEY`/`OPENROUTER_MODEL`/`OPENROUTER_VISION_MODEL`, `CF_ACCOUNT_ID`/`CF_API_TOKEN`/`CF_IMAGE_MODEL`, `DEBOUNCE_WINDOW` (5s), `DEBOUNCE_MAX_WAIT` (15s), RAG: `RAG_ENABLED` (false), `EMBED_MODEL` (`gemini-embedding-001`), `EMBED_DIM` (768), `RAG_TOP_K` (4), `RAG_MAX_DISTANCE` (0.65).
+- **Owns:** `line_ai_messages` (shared by LINE users and `web:` sessions), and `portfolio_knowledge` (pgvector corpus, when RAG is on). Needs the `pgvector/pgvector` Postgres image for the `vector` extension.
 
 ### consumer-reply-line-user
 The only egress, and the only service that builds LINE message shapes. Delivers

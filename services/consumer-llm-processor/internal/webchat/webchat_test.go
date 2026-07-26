@@ -78,6 +78,17 @@ func (f *fakeResponder) RouteStream(_ context.Context, history []store.Message, 
 	return f.result, f.err
 }
 
+// fakeRetriever returns a fixed context block and records the query it saw.
+type fakeRetriever struct {
+	block     string
+	lastQuery string
+}
+
+func (f *fakeRetriever) RetrieveContext(_ context.Context, query string) string {
+	f.lastQuery = query
+	return f.block
+}
+
 func request(t *testing.T, sessionID, message string) []byte {
 	t.Helper()
 	data, err := json.Marshal(Request{SessionID: sessionID, Message: message})
@@ -88,7 +99,7 @@ func request(t *testing.T, sessionID, message string) []byte {
 }
 
 func TestRespondInvalidJSONReturnsError(t *testing.T) {
-	c := New(&fakeHistoryStore{}, &fakeResponder{}, nil)
+	c := New(&fakeHistoryStore{}, &fakeResponder{}, nil, nil)
 	resp := c.respond(context.Background(), []byte("{not json"))
 	if resp.Error == "" {
 		t.Fatalf("expected error, got %+v", resp)
@@ -96,7 +107,7 @@ func TestRespondInvalidJSONReturnsError(t *testing.T) {
 }
 
 func TestRespondMissingSessionIDReturnsError(t *testing.T) {
-	c := New(&fakeHistoryStore{}, &fakeResponder{}, nil)
+	c := New(&fakeHistoryStore{}, &fakeResponder{}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "  ", "hello"))
 	if resp.Error != "missing session_id" {
 		t.Fatalf("expected missing session_id error, got %+v", resp)
@@ -105,7 +116,7 @@ func TestRespondMissingSessionIDReturnsError(t *testing.T) {
 
 func TestRespondEmptyMessageReturnsUsageHint(t *testing.T) {
 	r := &fakeResponder{}
-	c := New(&fakeHistoryStore{}, r, nil)
+	c := New(&fakeHistoryStore{}, r, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "   "))
 	if resp.Text != usageHint {
 		t.Fatalf("expected usage hint, got %+v", resp)
@@ -117,7 +128,7 @@ func TestRespondEmptyMessageReturnsUsageHint(t *testing.T) {
 
 func TestRespondOversizeMessageReturnsError(t *testing.T) {
 	r := &fakeResponder{}
-	c := New(&fakeHistoryStore{}, r, nil)
+	c := New(&fakeHistoryStore{}, r, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", strings.Repeat("ก", maxMessageChars+1)))
 	if resp.Error != "message too long" {
 		t.Fatalf("expected size error, got %+v", resp)
@@ -129,7 +140,7 @@ func TestRespondOversizeMessageReturnsError(t *testing.T) {
 
 func TestRespondResetClearsHistory(t *testing.T) {
 	s := &fakeHistoryStore{}
-	c := New(s, &fakeResponder{}, nil)
+	c := New(s, &fakeResponder{}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "/reset"))
 	if resp.Text != resetDone {
 		t.Fatalf("expected reset confirmation, got %+v", resp)
@@ -144,7 +155,7 @@ func TestRespondResetClearsHistory(t *testing.T) {
 
 func TestRespondResetClearErrorFallsBack(t *testing.T) {
 	s := &fakeHistoryStore{clearErr: errors.New("boom")}
-	c := New(s, &fakeResponder{}, nil)
+	c := New(s, &fakeResponder{}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "/reset"))
 	if resp.Text == resetDone || resp.Text == "" {
 		t.Fatalf("expected failure text, got %+v", resp)
@@ -154,7 +165,7 @@ func TestRespondResetClearErrorFallsBack(t *testing.T) {
 func TestRespondNormalTextAnswersAndStoresBothTurns(t *testing.T) {
 	s := &fakeHistoryStore{history: []store.Message{{Role: store.RoleUser, Content: "earlier"}}}
 	r := &fakeResponder{result: ai.Result{Text: "he works at LINE"}}
-	c := New(s, r, nil)
+	c := New(s, r, nil, nil)
 
 	resp := c.respond(context.Background(), request(t, "abc-123", "where does he work?"))
 	if resp.Text != "he works at LINE" || resp.Error != "" {
@@ -176,7 +187,7 @@ func TestRespondNormalTextAnswersAndStoresBothTurns(t *testing.T) {
 
 func TestRespondLLMErrorReturnsFriendlyText(t *testing.T) {
 	s := &fakeHistoryStore{}
-	c := New(s, &fakeResponder{err: errors.New("all providers failed")}, nil)
+	c := New(s, &fakeResponder{err: errors.New("all providers failed")}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "hi"))
 	if resp.Text != unavailableText || resp.Error != "" {
 		t.Fatalf("expected friendly failure text, got %+v", resp)
@@ -189,7 +200,7 @@ func TestRespondLLMErrorReturnsFriendlyText(t *testing.T) {
 func TestRespondHistoryLoadErrorStillAnswers(t *testing.T) {
 	s := &fakeHistoryStore{getErr: errors.New("db down")}
 	r := &fakeResponder{result: ai.Result{Text: "answer"}}
-	c := New(s, r, nil)
+	c := New(s, r, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "hi"))
 	if resp.Text != "answer" {
 		t.Fatalf("expected answer despite history failure, got %+v", resp)
@@ -201,7 +212,7 @@ func TestRespondHistoryLoadErrorStillAnswers(t *testing.T) {
 
 func TestRespondReminderIntentAnswersOffTopic(t *testing.T) {
 	s := &fakeHistoryStore{}
-	c := New(s, &fakeResponder{result: ai.Result{ReminderIntent: true}}, nil)
+	c := New(s, &fakeResponder{result: ai.Result{ReminderIntent: true}}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "remind me tomorrow"))
 	if resp.Text != offTopicText {
 		t.Fatalf("expected off-topic text, got %+v", resp)
@@ -212,10 +223,52 @@ func TestRespondReminderIntentAnswersOffTopic(t *testing.T) {
 }
 
 func TestRespondGeneratedImageAnswersOffTopic(t *testing.T) {
-	c := New(&fakeHistoryStore{}, &fakeResponder{result: ai.Result{ImageData: []byte{1}}}, nil)
+	c := New(&fakeHistoryStore{}, &fakeResponder{result: ai.Result{ImageData: []byte{1}}}, nil, nil)
 	resp := c.respond(context.Background(), request(t, "s1", "draw a cat"))
 	if resp.Text != offTopicText {
 		t.Fatalf("expected off-topic text, got %+v", resp)
+	}
+}
+
+func TestRespondAugmentsRoutedMessageButStoresRawQuery(t *testing.T) {
+	s := &fakeHistoryStore{}
+	r := &fakeResponder{result: ai.Result{Text: "he presented GitCoFL at InCIT 2025 (source: InCIT 2025 paper)"}}
+	ret := &fakeRetriever{block: "Relevant facts about Chokchai:\n- [source: InCIT 2025 paper] GitCoFL ..."}
+	c := New(s, r, nil, ret)
+
+	resp := c.respond(context.Background(), request(t, "s1", "what research has he done?"))
+	if resp.Error != "" {
+		t.Fatalf("unexpected error %+v", resp)
+	}
+	// The router saw the retrieved context prepended to the question...
+	if !strings.Contains(r.lastMessage, "[source: InCIT 2025 paper]") ||
+		!strings.Contains(r.lastMessage, "Question: what research has he done?") {
+		t.Fatalf("router did not receive augmented message: %q", r.lastMessage)
+	}
+	if ret.lastQuery != "what research has he done?" {
+		t.Fatalf("retriever saw %q", ret.lastQuery)
+	}
+	// ...but the stored history keeps the raw question, not the RAG preamble.
+	if len(s.appended) != 2 || s.appended[0].Content != "what research has he done?" {
+		t.Fatalf("expected raw question stored, got %+v", s.appended)
+	}
+}
+
+func TestRespondNoRetrieverLeavesMessageUnchanged(t *testing.T) {
+	r := &fakeResponder{result: ai.Result{Text: "ok"}}
+	c := New(&fakeHistoryStore{}, r, nil, nil) // no retriever
+	c.respond(context.Background(), request(t, "s1", "hello"))
+	if r.lastMessage != "hello" {
+		t.Fatalf("expected unaugmented message, got %q", r.lastMessage)
+	}
+}
+
+func TestRespondEmptyContextLeavesMessageUnchanged(t *testing.T) {
+	r := &fakeResponder{result: ai.Result{Text: "ok"}}
+	c := New(&fakeHistoryStore{}, r, nil, &fakeRetriever{block: ""}) // retrieval found nothing
+	c.respond(context.Background(), request(t, "s1", "hello"))
+	if r.lastMessage != "hello" {
+		t.Fatalf("expected unaugmented message when no context, got %q", r.lastMessage)
 	}
 }
 
@@ -240,7 +293,7 @@ func (s *streamCollector) text() string {
 func TestStreamRespondEmitsDeltasStoresAndDonesOnce(t *testing.T) {
 	store := &fakeHistoryStore{}
 	// fakeResponder emits result.Text as one delta via RouteStream.
-	c := New(store, &fakeResponder{result: ai.Result{Text: "He works at LINE."}}, nil)
+	c := New(store, &fakeResponder{result: ai.Result{Text: "He works at LINE."}}, nil, nil)
 	col := &streamCollector{}
 	c.streamRespond(context.Background(), request(t, "abc-1", "where?"), col.emit, col.done)
 
@@ -257,7 +310,7 @@ func TestStreamRespondEmitsDeltasStoresAndDonesOnce(t *testing.T) {
 
 func TestStreamRespondEmptyMessageHintNoStore(t *testing.T) {
 	store := &fakeHistoryStore{}
-	c := New(store, &fakeResponder{}, nil)
+	c := New(store, &fakeResponder{}, nil, nil)
 	col := &streamCollector{}
 	c.streamRespond(context.Background(), request(t, "s1", "  "), col.emit, col.done)
 	if col.text() != usageHint || col.doneRuns != 1 {
@@ -270,7 +323,7 @@ func TestStreamRespondEmptyMessageHintNoStore(t *testing.T) {
 
 func TestStreamRespondResetClears(t *testing.T) {
 	store := &fakeHistoryStore{}
-	c := New(store, &fakeResponder{}, nil)
+	c := New(store, &fakeResponder{}, nil, nil)
 	col := &streamCollector{}
 	c.streamRespond(context.Background(), request(t, "s1", "/reset"), col.emit, col.done)
 	if col.text() != resetDone || store.clearCalls != 1 {
@@ -280,7 +333,7 @@ func TestStreamRespondResetClears(t *testing.T) {
 
 func TestStreamRespondLLMErrorEmitsFallback(t *testing.T) {
 	store := &fakeHistoryStore{}
-	c := New(store, &fakeResponder{err: errors.New("boom")}, nil)
+	c := New(store, &fakeResponder{err: errors.New("boom")}, nil, nil)
 	col := &streamCollector{}
 	c.streamRespond(context.Background(), request(t, "s1", "hi"), col.emit, col.done)
 	if col.text() != unavailableText {
@@ -295,7 +348,7 @@ func TestStreamRespondLLMErrorEmitsFallback(t *testing.T) {
 }
 
 func TestStreamRespondOffTopicIntent(t *testing.T) {
-	c := New(&fakeHistoryStore{}, &fakeResponder{result: ai.Result{ReminderIntent: true}}, nil)
+	c := New(&fakeHistoryStore{}, &fakeResponder{result: ai.Result{ReminderIntent: true}}, nil, nil)
 	col := &streamCollector{}
 	c.streamRespond(context.Background(), request(t, "s1", "remind me"), col.emit, col.done)
 	if col.text() != offTopicText || col.doneRuns != 1 {
