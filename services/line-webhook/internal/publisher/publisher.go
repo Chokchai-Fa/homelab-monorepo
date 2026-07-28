@@ -2,6 +2,7 @@ package publisher
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -62,11 +63,18 @@ type Publisher struct {
 
 // New connects to NATS. The webhook must keep accepting LINE events when the
 // broker is down, so callers should treat a connection error as non-fatal.
+// RetryOnFailedConnect makes nats.Connect return a usable connection even when
+// the broker is unreachable at startup (e.g. NATS restarting during a rollout):
+// it reconnects in the background instead of leaving the publisher permanently
+// nil. Without it, a failed initial connect would silently drop every message
+// for the lifetime of the pod.
 func New(url, user, password string) (*Publisher, error) {
 	nc, err := nats.Connect(url,
 		nats.UserInfo(user, password),
 		nats.Name("line-webhook"),
+		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
 	)
 	if err != nil {
 		return nil, err
