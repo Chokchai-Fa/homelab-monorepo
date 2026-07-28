@@ -80,6 +80,7 @@ func main() {
 	nc, err := nats.Connect(config.NatsURL,
 		nats.UserInfo(config.NatsUser, config.NatsPassword),
 		nats.Name("subscriber-reminder-notifier"),
+		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
 	)
