@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -93,12 +94,33 @@ func main() {
 	}
 	log.Info().Str("addr", config.RedisAddr).Dur("flow_ttl", config.FlowTTL).Msg("startup: redis ready")
 
+	// natsClosing tells the ClosedHandler that this shutdown is intentional
+	// (a Drain on SIGTERM also closes the connection), so it doesn't mistake a
+	// graceful stop for a lost connection and exit non-zero.
+	var natsClosing atomic.Bool
 	nc, err := nats.Connect(config.NatsURL,
 		nats.UserInfo(config.NatsUser, config.NatsPassword),
 		nats.Name("consumer-reminder"),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Warn().Err(err).Msg("nats: disconnected - will retry")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			log.Info().Str("url", nc.ConnectedUrl()).Msg("nats: reconnected")
+		}),
+		// MaxReconnects(-1) retries forever, but a connection can still reach the
+		// terminal CLOSED state (e.g. a permanent auth/handshake failure). This
+		// consumer would then sit alive with dead subscriptions until restarted
+		// by hand, so exit and let Kubernetes restart it with a fresh connection.
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			if natsClosing.Load() {
+				return
+			}
+			log.Error().Msg("nats: connection closed permanently - exiting for restart")
+			os.Exit(1)
+		}),
 	)
 	if err != nil {
 		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
@@ -133,5 +155,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
+	natsClosing.Store(true)
 	log.Info().Str("signal", s.String()).Msg("shutdown: signal received")
 }

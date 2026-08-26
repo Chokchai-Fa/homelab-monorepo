@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 // Subjects of the LINE chat pipeline. AIRequestSubject must match the
@@ -68,13 +69,33 @@ type Publisher struct {
 // it reconnects in the background instead of leaving the publisher permanently
 // nil. Without it, a failed initial connect would silently drop every message
 // for the lifetime of the pod.
-func New(url, user, password string) (*Publisher, error) {
+//
+// MaxReconnects(-1) reconnects forever, but a NATS connection can still reach
+// the terminal CLOSED state (e.g. a permanent auth/handshake failure). Unlike
+// the consumers, the webhook stays alive on NATS trouble, so a closed
+// connection would leave it holding a dead *nats.Conn and silently dropping
+// every publish until the pod is restarted by hand. onClosed lets main mirror
+// the consumers' self-heal model: exit the process so Kubernetes restarts the
+// pod with a fresh connection instead of it limping along disconnected.
+func New(url, user, password string, onClosed func()) (*Publisher, error) {
 	nc, err := nats.Connect(url,
 		nats.UserInfo(user, password),
 		nats.Name("line-webhook"),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			log.Warn().Err(err).Msg("nats: disconnected - buffering events until reconnect")
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			log.Info().Str("url", nc.ConnectedUrl()).Msg("nats: reconnected")
+		}),
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			log.Error().Msg("nats: connection closed permanently - triggering restart")
+			if onClosed != nil {
+				onClosed()
+			}
+		}),
 	)
 	if err != nil {
 		return nil, err

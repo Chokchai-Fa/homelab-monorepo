@@ -103,7 +103,15 @@ func main() {
 	// Non-fatal on failure so the webhook keeps accepting LINE events.
 	var pub handler.EventPublisher
 	if config.NatsURL != "" {
-		p, err := publisher.New(config.NatsURL, config.NatsUser, config.NatsPassword)
+		// A permanently closed NATS connection can't be recovered in place, so
+		// exit and let Kubernetes restart the pod with a fresh connection
+		// (the consumers self-heal the same way). os.Exit skips deferred
+		// Drains, which is correct: the connection is already dead.
+		onClosed := func() {
+			log.Error().Msg("shutdown: NATS connection closed - exiting for restart")
+			os.Exit(1)
+		}
+		p, err := publisher.New(config.NatsURL, config.NatsUser, config.NatsPassword, onClosed)
 		if err != nil {
 			log.Error().Str("url", config.NatsURL).Err(err).Msg("startup: NATS unavailable - incoming messages will be dropped")
 		} else {
