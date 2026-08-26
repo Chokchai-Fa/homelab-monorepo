@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSubjects(t *testing.T) {
@@ -114,12 +115,33 @@ func TestProfileEventJSON(t *testing.T) {
 	}
 }
 
-func TestNewConnectionError(t *testing.T) {
-	// No server is listening on this loopback port, so Connect must return
-	// a non-nil error (and, crucially, not panic or hang) - the webhook
-	// treats a NATS connection failure as non-fatal at the call site.
-	_, err := New("nats://127.0.0.1:1", "", "")
-	if err == nil {
-		t.Fatal("New() with unreachable server error = nil, want non-nil")
+func TestNewUnreachableServerRetries(t *testing.T) {
+	// No server is listening on this loopback port. RetryOnFailedConnect(true)
+	// means Connect must NOT error or hang: it returns a usable publisher that
+	// reconnects in the background, so the webhook keeps accepting LINE events
+	// while NATS is down.
+	p, err := New("nats://127.0.0.1:1", "", "", nil)
+	if err != nil {
+		t.Fatalf("New() with unreachable server error = %v, want nil", err)
+	}
+	if p == nil {
+		t.Fatal("New() publisher = nil, want usable publisher")
+	}
+	p.Close()
+}
+
+func TestNewClosedTriggersOnClosed(t *testing.T) {
+	// A permanently closed connection must invoke onClosed so main can exit and
+	// let Kubernetes restart the pod, rather than holding a dead connection.
+	closed := make(chan struct{})
+	p, err := New("nats://127.0.0.1:1", "", "", func() { close(closed) })
+	if err != nil {
+		t.Fatalf("New() error = %v, want nil", err)
+	}
+	p.nc.Close()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onClosed not called after connection close")
 	}
 }

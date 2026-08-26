@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -112,7 +113,11 @@ func main() {
 
 	// NATS is the gateway's only backend. RetryOnFailedConnect keeps the
 	// process alive through NATS restarts; requests answer 503 meanwhile.
+	// natsClosing tells the ClosedHandler that this shutdown is intentional
+	// (a Drain on SIGTERM also closes the connection), so it doesn't mistake a
+	// graceful stop for a lost connection and exit non-zero.
 	var nc *nats.Conn
+	var natsClosing atomic.Bool
 	if config.NatsURL != "" {
 		nc, err = nats.Connect(config.NatsURL,
 			nats.UserInfo(config.NatsUser, config.NatsPassword),
@@ -120,6 +125,23 @@ func main() {
 			nats.RetryOnFailedConnect(true),
 			nats.MaxReconnects(-1),
 			nats.ReconnectWait(2*time.Second),
+			nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+				log.Warn().Err(err).Msg("nats: disconnected - will retry")
+			}),
+			nats.ReconnectHandler(func(nc *nats.Conn) {
+				log.Info().Str("url", nc.ConnectedUrl()).Msg("nats: reconnected")
+			}),
+			// MaxReconnects(-1) retries forever, but a connection can still reach
+			// the terminal CLOSED state. NATS is this gateway's only backend, so a
+			// dead connection means every request fails until restarted by hand;
+			// exit and let Kubernetes restart it with a fresh connection instead.
+			nats.ClosedHandler(func(_ *nats.Conn) {
+				if natsClosing.Load() {
+					return
+				}
+				log.Error().Msg("nats: connection closed permanently - exiting for restart")
+				os.Exit(1)
+			}),
 		)
 		if err != nil {
 			log.Error().Str("url", config.NatsURL).Err(err).Msg("startup: NATS unavailable - chat requests will fail")
@@ -175,6 +197,7 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
+	natsClosing.Store(true)
 	log.Info().Str("signal", s.String()).Msg("shutdown: signal received")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
