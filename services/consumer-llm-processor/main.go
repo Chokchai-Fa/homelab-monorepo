@@ -13,6 +13,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-llm-processor/internal/ai"
 	"consumer-llm-processor/internal/consumer"
 	"consumer-llm-processor/internal/extract"
@@ -295,7 +297,19 @@ func main() {
 		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
 	}
 	defer nc.Drain()
+	natsutil.StartWatchdog(nc, &natsClosing)
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
+
+	// JetStream carries the durable LINE chat pipeline (memory-backed, so no SD
+	// writes). The web request-reply channel below stays on core NATS.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal().Err(err).Msg("startup: failed to get JetStream context")
+	}
+	if err := natsutil.EnsureLineChatStream(js); err != nil {
+		log.Fatal().Str("stream", natsutil.LineChatStream).Err(err).Msg("startup: failed to ensure JetStream stream")
+	}
+	log.Info().Str("stream", natsutil.LineChatStream).Msg("startup: JetStream stream ready")
 
 	// Reminder handoff: the small extractor pulls message+time out of
 	// reminder asks before they're handed to consumer-reminder, and the flow
@@ -311,7 +325,7 @@ func main() {
 	}
 	flows := reminderflow.New(rdb)
 
-	c := consumer.New(conversations, router, images, nc, config.DebounceWindow, config.DebounceMaxWait, extractor, flows)
+	c := consumer.New(conversations, router, images, js, config.DebounceWindow, config.DebounceMaxWait, extractor, flows)
 	// Answer buffered bursts before draining NATS on shutdown (defers run
 	// LIFO, so Flush precedes Drain).
 	defer c.Flush()

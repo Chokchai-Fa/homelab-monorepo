@@ -14,6 +14,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-reminder/internal/consumer"
 	"consumer-reminder/internal/events"
 	"consumer-reminder/internal/flow"
@@ -126,21 +128,34 @@ func main() {
 		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
 	}
 	defer nc.Drain()
+	natsutil.StartWatchdog(nc, &natsClosing)
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
+
+	// JetStream carries the durable LINE chat pipeline (memory-backed, so no SD
+	// writes): reminder requests, postbacks and profile events in, replies out.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal().Err(err).Msg("startup: failed to get JetStream context")
+	}
+	if err := natsutil.EnsureLineChatStream(js); err != nil {
+		log.Fatal().Str("stream", natsutil.LineChatStream).Err(err).Msg("startup: failed to ensure JetStream stream")
+	}
+	log.Info().Str("stream", natsutil.LineChatStream).Msg("startup: JetStream stream ready")
 
 	publish := func(ev events.ReplyEvent) error {
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return err
 		}
-		return nc.Publish(events.ReplySubject, data)
+		_, err = js.Publish(events.ReplySubject, data)
+		return err
 	}
 
 	states := flow.NewStateStore(rdb, config.FlowTTL)
 	fl := flow.New(db, states, publish)
 
 	c := consumer.New(fl, db)
-	subs, err := c.Subscribe(nc)
+	subs, err := c.Subscribe(js)
 	if err != nil {
 		log.Fatal().Err(err).Msg("startup: failed to subscribe")
 	}

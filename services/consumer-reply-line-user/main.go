@@ -12,6 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-reply-line-user/internal/consumer"
 )
 
@@ -93,13 +95,25 @@ func main() {
 		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
 	}
 	defer nc.Drain()
+	natsutil.StartWatchdog(nc, &natsClosing)
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
+
+	// JetStream carries the durable LINE chat pipeline (memory-backed, so no SD
+	// writes): reply events in, delivery acks out.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal().Err(err).Msg("startup: failed to get JetStream context")
+	}
+	if err := natsutil.EnsureLineChatStream(js); err != nil {
+		log.Fatal().Str("stream", natsutil.LineChatStream).Err(err).Msg("startup: failed to ensure JetStream stream")
+	}
+	log.Info().Str("stream", natsutil.LineChatStream).Msg("startup: JetStream stream ready")
 
 	if config.ImageBaseURL == "" {
 		log.Info().Msg("startup: IMAGE_BASE_URL not set - generated-image replies disabled")
 	}
 	c := consumer.New(bot, config.ImageBaseURL)
-	sub, err := c.Subscribe(nc)
+	sub, err := c.Subscribe(js)
 	if err != nil {
 		log.Fatal().Str("subject", consumer.Subject).Err(err).Msg("startup: failed to subscribe")
 	}

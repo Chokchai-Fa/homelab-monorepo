@@ -12,6 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-llm-processor/internal/ai"
 	"consumer-llm-processor/internal/extract"
 	"consumer-llm-processor/internal/store"
@@ -101,7 +103,7 @@ type Consumer struct {
 	store     store.Store
 	ai        Responder
 	images    ImageStore
-	nc        *nats.Conn
+	js        nats.JetStreamContext
 	debounce  *Debouncer
 	extractor extract.Extractor
 	flows     FlowChecker
@@ -111,21 +113,24 @@ type Consumer struct {
 // chat messages until they've been quiet that long (capped at maxWait) and
 // answers them as one merged request; 0 answers every message individually.
 // extractor and flows serve the reminder handoff; both may be nil.
-func New(s store.Store, p Responder, images ImageStore, nc *nats.Conn, debounceWindow, debounceMaxWait time.Duration, extractor extract.Extractor, flows FlowChecker) *Consumer {
-	c := &Consumer{store: s, ai: p, images: images, nc: nc, extractor: extractor, flows: flows}
+func New(s store.Store, p Responder, images ImageStore, js nats.JetStreamContext, debounceWindow, debounceMaxWait time.Duration, extractor extract.Extractor, flows FlowChecker) *Consumer {
+	c := &Consumer{store: s, ai: p, images: images, js: js, extractor: extractor, flows: flows}
 	if debounceWindow > 0 {
 		c.debounce = NewDebouncer(debounceWindow, debounceMaxWait, c.Handle)
 	}
 	return c
 }
 
-// Subscribe attaches the consumer to NATS as a queue subscriber so future
-// replicas share the work.
+// Subscribe attaches the consumer to the durable JetStream queue consumer so
+// future replicas share the work and unprocessed requests survive a restart.
 func (c *Consumer) Subscribe() (*nats.Subscription, error) {
-	return c.nc.QueueSubscribe(RequestSubject, QueueGroup, func(msg *nats.Msg) {
+	return c.js.QueueSubscribe(RequestSubject, QueueGroup, func(msg *nats.Msg) {
 		var event RequestEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			log.Error().Str("subject", RequestSubject).Err(err).Msg("consume: failed to unmarshal event")
+			// Ack a malformed payload so JetStream drops it instead of
+			// redelivering the same poison message until MaxDeliver.
+			msg.Ack()
 			return
 		}
 		// Reminder traffic (trigger keyword or mid-flow answer) must not sit
@@ -133,10 +138,17 @@ func (c *Consumer) Subscribe() (*nats.Subscription, error) {
 		// burst would corrupt extraction.
 		if c.debounce != nil && !c.isReminderPath(event) {
 			c.debounce.Add(event)
+			// Ack on receipt: the debounce buffer now owns the message and
+			// Flush() drains it before Drain on shutdown. Only a hard crash
+			// with messages still buffered loses that sub-second window.
+			msg.Ack()
 			return
 		}
 		c.Handle(event)
-	})
+		msg.Ack()
+	},
+		natsutil.LineChatSubOpts(QueueGroup)...,
+	)
 }
 
 // isReminderPath reports whether the event belongs to the reminder pipeline:
@@ -198,7 +210,7 @@ func (c *Consumer) Handle(event RequestEvent) {
 		log.Error().Str("user_id", event.UserID).Err(err).Msg("publish: failed to marshal reply")
 		return
 	}
-	if err := c.nc.Publish(ReplySubject, data); err != nil {
+	if _, err := c.js.Publish(ReplySubject, data); err != nil {
 		log.Error().Str("subject", ReplySubject).Str("user_id", event.UserID).Err(err).Msg("publish: failed to publish reply")
 		return
 	}
@@ -302,7 +314,7 @@ func (c *Consumer) handOffReminder(ctx context.Context, event RequestEvent) {
 		log.Error().Str("user_id", event.UserID).Err(err).Msg("publish: failed to marshal reminder request")
 		return
 	}
-	if err := c.nc.Publish(ReminderRequestSubject, data); err != nil {
+	if _, err := c.js.Publish(ReminderRequestSubject, data); err != nil {
 		log.Error().Str("subject", ReminderRequestSubject).Str("user_id", event.UserID).Err(err).Msg("publish: failed to publish reminder request")
 		return
 	}

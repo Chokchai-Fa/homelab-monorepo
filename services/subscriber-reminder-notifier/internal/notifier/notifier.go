@@ -17,6 +17,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"subscriber-reminder-notifier/internal/events"
 	"subscriber-reminder-notifier/internal/store"
 )
@@ -45,13 +47,14 @@ type Notifier struct {
 	publish func(events.ReplyEvent) error
 }
 
-func New(st Store, rdb *redis.Client, nc *nats.Conn) *Notifier {
+func New(st Store, rdb *redis.Client, js nats.JetStreamContext) *Notifier {
 	return &Notifier{store: st, redis: rdb, publish: func(ev events.ReplyEvent) error {
 		data, err := json.Marshal(ev)
 		if err != nil {
 			return err
 		}
-		return nc.Publish(events.ReplySubject, data)
+		_, err = js.Publish(events.ReplySubject, data)
+		return err
 	}}
 }
 
@@ -146,19 +149,26 @@ func (n *Notifier) revertOrFail(ctx context.Context, id int64, reason string) {
 	}
 }
 
-// SubscribeDelivery attaches a queue subscriber for delivery acks published
-// by consumer-reply-line-user.
-func (n *Notifier) SubscribeDelivery(nc *nats.Conn, queueGroup string) (*nats.Subscription, error) {
-	return nc.QueueSubscribe(events.DeliverySubject, queueGroup, func(msg *nats.Msg) {
+// SubscribeDelivery attaches a durable JetStream queue consumer for delivery
+// acks published by consumer-reply-line-user, so an ack survives a restart of
+// this service.
+func (n *Notifier) SubscribeDelivery(js nats.JetStreamContext, queueGroup string) (*nats.Subscription, error) {
+	return js.QueueSubscribe(events.DeliverySubject, queueGroup, func(msg *nats.Msg) {
 		var ack events.DeliveryEvent
 		if err := json.Unmarshal(msg.Data, &ack); err != nil {
 			log.Error().Str("subject", events.DeliverySubject).Err(err).Msg("notifier: bad delivery ack")
+			// Ack a malformed payload so JetStream drops it instead of
+			// redelivering the same poison message until MaxDeliver.
+			msg.Ack()
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), claimTimeout)
 		defer cancel()
 		n.handleDelivery(ctx, ack)
-	})
+		msg.Ack()
+	},
+		natsutil.LineChatSubOpts(queueGroup)...,
+	)
 }
 
 // failReason maps a delivery error code to the reason string

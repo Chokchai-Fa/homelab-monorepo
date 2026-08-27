@@ -3,6 +3,7 @@ module line-webhook
 go 1.25.0
 
 require (
+	github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil v0.0.0-00010101000000-000000000000
 	github.com/joho/godotenv v1.5.1
 	github.com/labstack/echo/v4 v4.13.4
 	github.com/line/line-bot-sdk-go/v7 v7.21.0
@@ -28,3 +29,5 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 )
+
+replace github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil => ../../libs/natsutil

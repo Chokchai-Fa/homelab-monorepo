@@ -2,10 +2,13 @@ package publisher
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
+
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
 )
 
 // Subjects of the LINE chat pipeline. AIRequestSubject must match the
@@ -57,9 +60,11 @@ type ProfileEvent struct {
 	Timestamp   int64  `json:"timestamp"`
 }
 
-// Publisher publishes LINE chat events to NATS.
+// Publisher publishes LINE chat events to the durable JetStream pipeline.
 type Publisher struct {
-	nc *nats.Conn
+	nc      *nats.Conn
+	js      nats.JetStreamContext
+	closing atomic.Bool
 }
 
 // New connects to NATS. The webhook must keep accepting LINE events when the
@@ -100,7 +105,26 @@ func New(url, user, password string, onClosed func()) (*Publisher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Publisher{nc: nc}, nil
+
+	// The LINE pipeline publishes into the durable memory-backed JetStream
+	// stream, so an event survives a consumer restart. Ensuring the stream here
+	// too means the webhook can be the first pod up after a NATS restart.
+	js, err := nc.JetStream()
+	if err != nil {
+		nc.Close()
+		return nil, err
+	}
+	// Ensuring the stream is a server round trip, so it fails whenever the
+	// broker is unreachable - exactly the startup case RetryOnFailedConnect
+	// exists to survive. Warn and carry on: every consumer ensures the same
+	// stream, and publishes reconnect on their own once the broker is back.
+	if err := natsutil.EnsureLineChatStream(js); err != nil {
+		log.Warn().Err(err).Msg("nats: could not ensure the LINE chat stream - a consumer will create it")
+	}
+
+	p := &Publisher{nc: nc, js: js}
+	natsutil.StartWatchdog(nc, &p.closing)
+	return p, nil
 }
 
 // PublishAIRequest sends one event to the AI request subject.
@@ -128,9 +152,11 @@ func (p *Publisher) publish(subject string, event any) error {
 	if err != nil {
 		return err
 	}
-	return p.nc.Publish(subject, data)
+	_, err = p.js.Publish(subject, data)
+	return err
 }
 
 func (p *Publisher) Close() {
+	p.closing.Store(true)
 	p.nc.Drain()
 }
