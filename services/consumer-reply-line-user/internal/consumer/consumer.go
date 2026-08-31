@@ -10,6 +10,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-reply-line-user/internal/flex"
 )
 
@@ -75,25 +77,32 @@ type DeliveryEvent struct {
 type Consumer struct {
 	bot          *linebot.Client
 	imageBaseURL string
-	nc           *nats.Conn // set by Subscribe; used for delivery acks
+	js           nats.JetStreamContext // set by Subscribe; used for delivery acks
 }
 
 func New(bot *linebot.Client, imageBaseURL string) *Consumer {
 	return &Consumer{bot: bot, imageBaseURL: strings.TrimRight(imageBaseURL, "/")}
 }
 
-// Subscribe attaches the consumer to NATS as a queue subscriber so future
-// replicas share the work. The connection is kept for delivery acks.
-func (c *Consumer) Subscribe(nc *nats.Conn) (*nats.Subscription, error) {
-	c.nc = nc
-	return nc.QueueSubscribe(Subject, QueueGroup, func(msg *nats.Msg) {
+// Subscribe attaches the consumer to the durable JetStream queue consumer so
+// future replicas share the work and undelivered replies survive a restart.
+// The JetStream context is kept for delivery acks.
+func (c *Consumer) Subscribe(js nats.JetStreamContext) (*nats.Subscription, error) {
+	c.js = js
+	return js.QueueSubscribe(Subject, QueueGroup, func(msg *nats.Msg) {
 		var event ReplyEvent
 		if err := json.Unmarshal(msg.Data, &event); err != nil {
 			log.Error().Str("subject", Subject).Err(err).Msg("consume: failed to unmarshal event")
+			// Ack a malformed payload so JetStream drops it instead of
+			// redelivering the same poison message until MaxDeliver.
+			msg.Ack()
 			return
 		}
 		c.Handle(event)
-	})
+		msg.Ack()
+	},
+		natsutil.LineChatSubOpts(QueueGroup)...,
+	)
 }
 
 // maxMessagesPerCall is LINE's limit on messages per reply/push API call.
@@ -185,8 +194,8 @@ func (c *Consumer) ackDelivery(event ReplyEvent, ok bool, err error) {
 			ack.ErrorCode = apiErr.Code
 		}
 	}
-	if c.nc == nil {
-		log.Error().Int64("reminder_id", event.ReminderID).Msg("ack: no NATS connection - delivery ack dropped")
+	if c.js == nil {
+		log.Error().Int64("reminder_id", event.ReminderID).Msg("ack: no JetStream context - delivery ack dropped")
 		return
 	}
 	data, marshalErr := json.Marshal(ack)
@@ -194,7 +203,7 @@ func (c *Consumer) ackDelivery(event ReplyEvent, ok bool, err error) {
 		log.Error().Int64("reminder_id", event.ReminderID).Err(marshalErr).Msg("ack: marshal failed")
 		return
 	}
-	if pubErr := c.nc.Publish(DeliverySubject, data); pubErr != nil {
+	if _, pubErr := c.js.Publish(DeliverySubject, data); pubErr != nil {
 		log.Error().Int64("reminder_id", event.ReminderID).Err(pubErr).Msg("ack: publish failed")
 		return
 	}

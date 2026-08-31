@@ -13,6 +13,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"subscriber-reminder-notifier/internal/notifier"
 	"subscriber-reminder-notifier/internal/store"
 )
@@ -110,11 +112,23 @@ func main() {
 		log.Fatal().Str("url", config.NatsURL).Err(err).Msg("startup: failed to connect to NATS")
 	}
 	defer nc.Drain()
+	natsutil.StartWatchdog(nc, &natsClosing)
 	log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 
-	n := notifier.New(db, rdb, nc)
+	// JetStream carries the durable LINE chat pipeline (memory-backed, so no SD
+	// writes): fired-reminder replies out, delivery acks in.
+	js, err := nc.JetStream()
+	if err != nil {
+		log.Fatal().Err(err).Msg("startup: failed to get JetStream context")
+	}
+	if err := natsutil.EnsureLineChatStream(js); err != nil {
+		log.Fatal().Str("stream", natsutil.LineChatStream).Err(err).Msg("startup: failed to ensure JetStream stream")
+	}
+	log.Info().Str("stream", natsutil.LineChatStream).Msg("startup: JetStream stream ready")
 
-	sub, err := n.SubscribeDelivery(nc, queueGroup)
+	n := notifier.New(db, rdb, js)
+
+	sub, err := n.SubscribeDelivery(js, queueGroup)
 	if err != nil {
 		log.Fatal().Err(err).Msg("startup: failed to subscribe to delivery acks")
 	}

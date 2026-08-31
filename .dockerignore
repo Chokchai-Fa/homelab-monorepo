@@ -1,0 +1,17 @@
+# Applies to builds whose context is the repo root — i.e. the Go services,
+# which build from the root so that shared modules under libs/ are reachable
+# (they are `replace` targets outside any single service dir).
+#
+# The Go images copy only libs/ and their own service dir, but the context is
+# uploaded to the builder in full, so exclude the heavy trees no Go build
+# reads. The Node/Docusaurus images use their own context under apps/ and
+# their own .dockerignore, so nothing here affects them.
+#
+# Do not exclude build/ — the Dockerfile itself is read from the context.
+.git
+.github
+apps
+docs
+scripts
+**/node_modules
+*.md

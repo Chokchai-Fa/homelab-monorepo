@@ -24,6 +24,8 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"portfolio-chat-gateway/internal/handler"
 )
 
@@ -148,6 +150,7 @@ func main() {
 			nc = nil
 		} else {
 			defer nc.Drain()
+			natsutil.StartWatchdog(nc, &natsClosing)
 			log.Info().Str("url", config.NatsURL).Msg("startup: connected to NATS")
 		}
 	} else {

@@ -11,6 +11,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil"
+
 	"consumer-reminder/internal/events"
 	"consumer-reminder/internal/flow"
 )
@@ -45,28 +47,30 @@ func New(f *flow.Flow, users UserStore) *Consumer {
 	return &Consumer{flow: f, users: users}
 }
 
-// Subscribe attaches queue subscribers for the three inbound subjects and
-// returns them for shutdown cleanup.
-func (c *Consumer) Subscribe(nc *nats.Conn) ([]*nats.Subscription, error) {
+// Subscribe attaches durable JetStream queue consumers for the three inbound
+// subjects and returns them for shutdown cleanup. Each subject gets its own
+// durable so the WorkQueue stream sees three non-overlapping consumers.
+func (c *Consumer) Subscribe(js nats.JetStreamContext) ([]*nats.Subscription, error) {
 	var subs []*nats.Subscription
 
-	sub, err := nc.QueueSubscribe(events.ReminderRequestSubject, QueueGroup, c.handleReminderRequestMsg)
-	if err != nil {
-		return nil, err
+	specs := []struct {
+		subject string
+		durable string
+		handler nats.MsgHandler
+	}{
+		{events.ReminderRequestSubject, QueueGroup + "-request", c.handleReminderRequestMsg},
+		{events.PostbackSubject, QueueGroup + "-postback", c.handlePostbackMsg},
+		{events.ProfileSubject, QueueGroup + "-profile", c.handleProfileMsg},
 	}
-	subs = append(subs, sub)
-
-	sub, err = nc.QueueSubscribe(events.PostbackSubject, QueueGroup, c.handlePostbackMsg)
-	if err != nil {
-		return nil, err
+	for _, s := range specs {
+		sub, err := js.QueueSubscribe(s.subject, s.durable, s.handler,
+			natsutil.LineChatSubOpts(s.durable)...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, sub)
 	}
-	subs = append(subs, sub)
-
-	sub, err = nc.QueueSubscribe(events.ProfileSubject, QueueGroup, c.handleProfileMsg)
-	if err != nil {
-		return nil, err
-	}
-	subs = append(subs, sub)
 
 	return subs, nil
 }
@@ -79,16 +83,19 @@ func (c *Consumer) handleReminderRequestMsg(msg *nats.Msg) {
 	var ev events.ReminderRequestEvent
 	if err := json.Unmarshal(msg.Data, &ev); err != nil {
 		log.Error().Str("subject", events.ReminderRequestSubject).Err(err).Msg("consume: bad reminder request")
+		msg.Ack()
 		return
 	}
 	if ev.UserID == "" {
 		log.Error().Str("subject", events.ReminderRequestSubject).Msg("consume: dropping request without user_id")
+		msg.Ack()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
 	defer cancel()
 	log.Info().Str("user_id", ev.UserID).Msg("consume: reminder request received")
 	c.flow.HandleRequest(ctx, ev)
+	msg.Ack()
 }
 
 // handlePostbackMsg is handleReminderRequestMsg's counterpart for postbacks.
@@ -96,16 +103,19 @@ func (c *Consumer) handlePostbackMsg(msg *nats.Msg) {
 	var ev events.PostbackEvent
 	if err := json.Unmarshal(msg.Data, &ev); err != nil {
 		log.Error().Str("subject", events.PostbackSubject).Err(err).Msg("consume: bad postback")
+		msg.Ack()
 		return
 	}
 	if ev.UserID == "" {
 		log.Error().Str("subject", events.PostbackSubject).Msg("consume: dropping postback without user_id")
+		msg.Ack()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
 	defer cancel()
 	log.Info().Str("user_id", ev.UserID).Str("data", ev.Data).Msg("consume: postback received")
 	c.flow.HandlePostback(ctx, ev)
+	msg.Ack()
 }
 
 // handleProfileMsg is handleReminderRequestMsg's counterpart for profile
@@ -114,17 +124,22 @@ func (c *Consumer) handleProfileMsg(msg *nats.Msg) {
 	var ev events.ProfileEvent
 	if err := json.Unmarshal(msg.Data, &ev); err != nil {
 		log.Error().Str("subject", events.ProfileSubject).Err(err).Msg("consume: bad profile event")
+		msg.Ack()
 		return
 	}
 	if ev.UserID == "" || ev.DisplayName == "" {
 		log.Error().Str("subject", events.ProfileSubject).Msg("consume: dropping incomplete profile event")
+		msg.Ack()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), handleTimeout)
 	defer cancel()
 	if err := c.users.UpsertUser(ctx, ev.UserID, ev.DisplayName); err != nil {
 		log.Error().Str("user_id", ev.UserID).Err(err).Msg("consume: profile upsert failed")
+		// Leave unacked: a transient DB failure should redeliver rather than
+		// silently drop the profile update.
 		return
 	}
 	log.Info().Str("user_id", ev.UserID).Str("display_name", ev.DisplayName).Msg("consume: profile upserted")
+	msg.Ack()
 }

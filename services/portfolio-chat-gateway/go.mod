@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil v0.0.0
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/labstack/gommon v0.4.2 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
@@ -24,3 +25,5 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 )
+
+replace github.com/Chokchai-Fa/homelab-monorepo/libs/natsutil => ../../libs/natsutil
