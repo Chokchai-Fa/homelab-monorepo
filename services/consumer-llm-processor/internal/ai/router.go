@@ -24,6 +24,43 @@ const (
 	classifyTimeout = 10 * time.Second
 )
 
+// Vars, not consts, so tests can shorten them; production never reassigns.
+var (
+	// perProviderTimeout bounds ONE provider attempt. The whole Route call
+	// shares a single budget (consumer.generateTimeout), and without this
+	// the first provider can spend all of it: a free-tier reasoning model
+	// that usually answers in ~10s occasionally takes 60s+, and every
+	// provider behind it then gets an already-dead context and fails
+	// instantly without making a real request - observed in production as
+	// all four providers on the technical tier logging "context deadline
+	// exceeded" in the same second. A slow leader should cost its own slot,
+	// not the whole chain.
+	perProviderTimeout = 25 * time.Second
+
+	// minProviderTimeout is the least remaining budget worth starting an
+	// attempt with. Below this the request would almost certainly die
+	// mid-flight and only delay the fallback reply to the user.
+	minProviderTimeout = 5 * time.Second
+)
+
+// providerContext derives the per-attempt context: at most
+// perProviderTimeout, and never past the parent's deadline. ok is false when
+// too little budget remains for the attempt to be worth starting.
+func providerContext(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	budget := perProviderTimeout
+	if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+		remaining := time.Until(deadline)
+		if remaining < minProviderTimeout {
+			return nil, nil, false
+		}
+		if remaining < budget {
+			budget = remaining
+		}
+	}
+	pctx, cancel := context.WithTimeout(ctx, budget)
+	return pctx, cancel, true
+}
+
 // Result is what the router hands back: an answer text, or a generated
 // image (with optional caption text) when the user asked for a picture.
 // ReminderIntent means the message belongs to consumer-reminder; this
@@ -91,7 +128,13 @@ func (r *Router) Route(ctx context.Context, history []store.Message, userMessage
 	}
 
 	for _, p := range chain {
-		answer, err := p.Reply(ctx, history, userMessage, image)
+		pctx, cancel, ok := providerContext(ctx)
+		if !ok {
+			log.Warn().Str("tier", label).Str("provider", p.Name()).Msg("route: budget spent - skipping remaining providers")
+			break
+		}
+		answer, err := p.Reply(pctx, history, userMessage, image)
+		cancel()
 		if err != nil {
 			log.Warn().Str("tier", label).Str("provider", p.Name()).Err(err).Msg("route: provider failed - trying next")
 			continue
