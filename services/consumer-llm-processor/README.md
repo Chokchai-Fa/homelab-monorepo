@@ -45,8 +45,8 @@ REDIS_PASSWORD=
 
 # Optional free-tier providers (enable by setting the API key)
 GROQ_API_KEY=
-GROQ_MODEL=llama-3.3-70b-versatile
-GROQ_CLASSIFIER_MODEL=llama-3.1-8b-instant
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_CLASSIFIER_MODEL=openai/gpt-oss-20b
 OPENROUTER_API_KEY=
 OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free
 OPENROUTER_VISION_MODEL=google/gemma-4-31b-it:free

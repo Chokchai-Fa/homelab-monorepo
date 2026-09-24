@@ -65,18 +65,24 @@ type Config struct {
 
 func loadConfig() *Config {
 	return &Config{
-		NatsURL:             getEnv("NATS_URL", nats.DefaultURL),
-		NatsUser:            getEnv("NATS_USER", ""),
-		NatsPassword:        getEnv("NATS_PASSWORD", ""),
-		GeminiAPIKey:        getEnv("GEMINI_API_KEY", ""),
-		GeminiModel:         getEnv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
-		GeminiImageModel:    getEnv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
-		CFAccountID:         getEnv("CF_ACCOUNT_ID", ""),
-		CFAPIToken:          getEnv("CF_API_TOKEN", ""),
-		CFImageModel:        getEnv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell"),
-		GroqAPIKey:          getEnv("GROQ_API_KEY", ""),
-		GroqModel:           getEnv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "llama-3.1-8b-instant"),
+		NatsURL:          getEnv("NATS_URL", nats.DefaultURL),
+		NatsUser:         getEnv("NATS_USER", ""),
+		NatsPassword:     getEnv("NATS_PASSWORD", ""),
+		GeminiAPIKey:     getEnv("GEMINI_API_KEY", ""),
+		GeminiModel:      getEnv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+		GeminiImageModel: getEnv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
+		CFAccountID:      getEnv("CF_ACCOUNT_ID", ""),
+		CFAPIToken:       getEnv("CF_API_TOKEN", ""),
+		CFImageModel:     getEnv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell"),
+		GroqAPIKey:       getEnv("GROQ_API_KEY", ""),
+		// Groq moved the Llama line (llama-3.3-70b-versatile,
+		// llama-3.1-8b-instant) to Enterprise "contact sales" in 2026-09;
+		// free/developer keys now get 404 model_not_found on them. The
+		// gpt-oss pair is what the free plan actually serves - check
+		// https://console.groq.com/docs/rate-limits (Free Plan Limits)
+		// before changing these.
+		GroqModel:           getEnv("GROQ_MODEL", "openai/gpt-oss-120b"),
+		GroqClassifierModel: getEnv("GROQ_CLASSIFIER_MODEL", "openai/gpt-oss-20b"),
 		OpenRouterAPIKey:    getEnv("OPENROUTER_API_KEY", ""),
 		// OpenRouter's :free lineup rotates (deepseek-r1:free died 2026-07);
 		// verify against https://openrouter.ai/api/v1/models when it 404s.
