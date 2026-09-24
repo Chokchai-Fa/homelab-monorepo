@@ -340,6 +340,18 @@ func main() {
 		log.Fatal().Str("subject", consumer.RequestSubject).Err(err).Msg("startup: failed to subscribe")
 	}
 	defer sub.Unsubscribe()
+
+	// Subscribe can report success locally while the server-side durable
+	// consumer silently fails to persist (see natsutil.VerifyConsumer) -
+	// confirm it actually exists before declaring this pod healthy, and
+	// keep checking: exiting hands a broken subscription to Kubernetes as a
+	// restart instead of leaving the pod alive and quietly dropping every
+	// AI request.
+	if err := natsutil.VerifyConsumer(js, consumer.QueueGroup); err != nil {
+		log.Fatal().Str("subject", consumer.RequestSubject).Str("durable", consumer.QueueGroup).Err(err).
+			Msg("startup: subscribed but durable consumer missing on server - exiting")
+	}
+	natsutil.StartConsumerWatchdog(js, consumer.QueueGroup, &natsClosing)
 	log.Info().
 		Str("subject", consumer.RequestSubject).
 		Str("queue", consumer.QueueGroup).

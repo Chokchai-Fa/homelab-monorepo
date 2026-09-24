@@ -133,6 +133,18 @@ func main() {
 		log.Fatal().Err(err).Msg("startup: failed to subscribe to delivery acks")
 	}
 	defer sub.Unsubscribe()
+
+	// Subscribe can report success locally while the server-side durable
+	// consumer silently fails to persist (see natsutil.VerifyConsumer) -
+	// confirm it actually exists before declaring this pod healthy, and
+	// keep checking: exiting hands a broken subscription to Kubernetes as a
+	// restart instead of leaving the pod alive and quietly dropping every
+	// delivery ack, which would leave fired reminders stuck "pending"
+	// forever.
+	if err := natsutil.VerifyConsumer(js, queueGroup); err != nil {
+		log.Fatal().Str("durable", queueGroup).Err(err).Msg("startup: subscribed but durable consumer missing on server - exiting")
+	}
+	natsutil.StartConsumerWatchdog(js, queueGroup, &natsClosing)
 	log.Info().Msg("startup: subscribed to delivery acks - notifier running")
 
 	if err := n.Run(ctx); err != nil && ctx.Err() == nil {

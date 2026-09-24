@@ -164,6 +164,24 @@ func main() {
 			sub.Unsubscribe()
 		}
 	}()
+
+	// Subscribe can report success locally while a server-side durable
+	// consumer silently fails to persist (see natsutil.VerifyConsumer) -
+	// confirm each of the three durables this service owns actually exists
+	// before declaring the pod healthy, and keep checking: exiting hands a
+	// broken subscription to Kubernetes as a restart instead of leaving the
+	// pod alive and quietly dropping reminder requests, postbacks or
+	// profile updates.
+	for _, durable := range []string{
+		consumer.QueueGroup + "-request",
+		consumer.QueueGroup + "-postback",
+		consumer.QueueGroup + "-profile",
+	} {
+		if err := natsutil.VerifyConsumer(js, durable); err != nil {
+			log.Fatal().Str("durable", durable).Err(err).Msg("startup: subscribed but durable consumer missing on server - exiting")
+		}
+		natsutil.StartConsumerWatchdog(js, durable, &natsClosing)
+	}
 	log.Info().Str("queue", consumer.QueueGroup).Msg("startup: subscribed - consumer running")
 
 	// Pure consumer: no HTTP server, just block until asked to shut down.
