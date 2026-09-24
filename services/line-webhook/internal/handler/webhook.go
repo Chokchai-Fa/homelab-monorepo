@@ -454,6 +454,7 @@ func (h *LineHandler) reply(event *linebot.Event, text string) error {
 		UserID:     event.Source.UserID,
 		ReplyToken: event.ReplyToken,
 		Text:       text,
+		Timestamp:  event.Timestamp.UnixMilli(),
 	}); err != nil {
 		log.Error().Str("subject", publisher.ReplySubject).Str("user_id", event.Source.UserID).Err(err).Msg("webhook: failed to publish reply")
 		return err

@@ -55,6 +55,12 @@ type ReplyEvent struct {
 	ReplyToken string `json:"reply_token"`
 	Text       string `json:"text"`
 	ImageKey   string `json:"image_key,omitempty"`
+	// Timestamp is the originating webhook event's time, carried through so
+	// consumer-reply-line-user can tell whether ReplyToken is still young
+	// enough to use. Generating an answer takes 10-60s (debounce + LLM),
+	// which outlives the token; LINE then accepts the reply with a 2xx and
+	// delivers nothing, so the age is what decides reply vs push.
+	Timestamp int64 `json:"timestamp,omitempty"`
 }
 
 // ReminderRequestEvent is consumed by consumer-reminder, which owns the
@@ -204,6 +210,7 @@ func (c *Consumer) Handle(event RequestEvent) {
 		ReplyToken: event.ReplyToken,
 		Text:       text,
 		ImageKey:   imageKey,
+		Timestamp:  event.Timestamp,
 	}
 	data, err := json.Marshal(reply)
 	if err != nil {

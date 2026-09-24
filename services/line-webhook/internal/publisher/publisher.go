@@ -36,10 +36,13 @@ type AIRequestEvent struct {
 }
 
 // ReplyEvent is consumed by consumer-reply-line-user, which sends it to LINE.
+// Timestamp is the originating webhook event's time; the reply service uses
+// it to decide whether ReplyToken is still young enough to be worth using.
 type ReplyEvent struct {
 	UserID     string `json:"user_id"`
 	ReplyToken string `json:"reply_token"`
 	Text       string `json:"text"`
+	Timestamp  int64  `json:"timestamp,omitempty"`
 }
 
 // PostbackEvent carries a quick-reply button press to consumer-reminder.
