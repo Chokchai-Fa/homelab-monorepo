@@ -55,6 +55,7 @@ type ReminderPayload struct {
 type ReplyEvent struct {
 	UserID       string           `json:"user_id"`
 	ReplyToken   string           `json:"reply_token"`
+	Timestamp    int64            `json:"timestamp,omitempty"`
 	Text         string           `json:"text"`
 	ImageKey     string           `json:"image_key,omitempty"`
 	QuickReplies []QuickReply     `json:"quick_replies,omitempty"`
@@ -108,6 +109,29 @@ func (c *Consumer) Subscribe(js nats.JetStreamContext) (*nats.Subscription, erro
 // maxMessagesPerCall is LINE's limit on messages per reply/push API call.
 const maxMessagesPerCall = 5
 
+// maxReplyTokenAge is how long after its webhook event a reply token is
+// still trusted. LINE answers 2xx for a token that has aged out and then
+// delivers nothing, so a successful response is not proof of delivery - the
+// age is the only signal we have. Replies published straight from the
+// webhook (the /ai confirmation) are milliseconds old and keep using the
+// free token; an LLM answer is 10-60s old (debounce + generation) and goes
+// to push instead, which actually arrives.
+const maxReplyTokenAge = 20 * time.Second
+
+// replyTokenUsable reports whether event's reply token is worth trying.
+// A zero Timestamp means the publisher didn't stamp the event - either an
+// older build or one in flight across a rolling deploy - so the token is
+// tried as before rather than spending push quota on every such reply.
+func replyTokenUsable(event ReplyEvent) bool {
+	if event.ReplyToken == "" {
+		return false
+	}
+	if event.Timestamp == 0 {
+		return true
+	}
+	return time.Since(time.UnixMilli(event.Timestamp)) <= maxReplyTokenAge
+}
+
 // Handle delivers one reply: the (free) reply token first; if it has expired
 // or was already consumed, falls back to push messages.
 //
@@ -142,7 +166,7 @@ func (c *Consumer) Handle(event ReplyEvent) {
 func (c *Consumer) deliver(event ReplyEvent, messages []linebot.SendingMessage) (bool, error) {
 	delivered := false
 
-	if event.ReplyToken != "" {
+	if replyTokenUsable(event) {
 		replyBatch := messages
 		if len(replyBatch) > maxMessagesPerCall {
 			replyBatch = replyBatch[:maxMessagesPerCall]
@@ -157,6 +181,10 @@ func (c *Consumer) deliver(event ReplyEvent, messages []linebot.SendingMessage) 
 		} else {
 			log.Error().Str("user_id", event.UserID).Err(err).Msg("deliver: reply token failed - falling back to push")
 		}
+	} else if event.ReplyToken != "" {
+		log.Info().Str("user_id", event.UserID).
+			Dur("token_age", time.Since(time.UnixMilli(event.Timestamp))).
+			Msg("deliver: reply token too old to trust - using push")
 	}
 
 	if event.UserID == "" {

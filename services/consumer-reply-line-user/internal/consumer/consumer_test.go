@@ -469,3 +469,75 @@ func TestSplitReplyMessages(t *testing.T) {
 		})
 	}
 }
+
+// TestDeliverSkipsStaleReplyToken covers the silent-drop case: LINE answers
+// 2xx for a reply token that has already aged out and then delivers nothing,
+// so a 200 can't be trusted once the token is old. An LLM answer arrives
+// 10-60s after the webhook event (debounce + generation), well past the
+// token's life, and must go straight to push.
+func TestDeliverSkipsStaleReplyToken(t *testing.T) {
+	var calls []string
+	bot := newTestBot(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	c := New(bot, "")
+
+	stale := ReplyEvent{
+		ReplyToken: "tok",
+		UserID:     "u1",
+		Timestamp:  time.Now().Add(-60 * time.Second).UnixMilli(),
+	}
+	delivered, err := c.deliver(stale, textMessages(1))
+	if err != nil {
+		t.Fatalf("deliver error = %v, want nil", err)
+	}
+	if !delivered {
+		t.Fatal("delivered = false, want true")
+	}
+	if len(calls) != 1 || calls[0] != linebot.APIEndpointPushMessage {
+		t.Fatalf("calls = %v, want single call to %s", calls, linebot.APIEndpointPushMessage)
+	}
+}
+
+// A reply published straight from the webhook (the /ai confirmation) is
+// seconds old at most and must still use the free reply token.
+func TestDeliverUsesReplyTokenWhenFresh(t *testing.T) {
+	var calls []string
+	bot := newTestBot(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	c := New(bot, "")
+
+	fresh := ReplyEvent{
+		ReplyToken: "tok",
+		UserID:     "u1",
+		Timestamp:  time.Now().Add(-2 * time.Second).UnixMilli(),
+	}
+	if _, err := c.deliver(fresh, textMessages(1)); err != nil {
+		t.Fatalf("deliver error = %v, want nil", err)
+	}
+	if len(calls) != 1 || calls[0] != linebot.APIEndpointReplyMessage {
+		t.Fatalf("calls = %v, want single call to %s", calls, linebot.APIEndpointReplyMessage)
+	}
+}
+
+// Timestamp 0 means "age unknown" - events published by a not-yet-upgraded
+// service, or in flight across a rolling deploy. Keep the old behaviour
+// there rather than spending push quota on every one.
+func TestDeliverUsesReplyTokenWhenTimestampMissing(t *testing.T) {
+	var calls []string
+	bot := newTestBot(t, func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	c := New(bot, "")
+
+	if _, err := c.deliver(ReplyEvent{ReplyToken: "tok", UserID: "u1"}, textMessages(1)); err != nil {
+		t.Fatalf("deliver error = %v, want nil", err)
+	}
+	if len(calls) != 1 || calls[0] != linebot.APIEndpointReplyMessage {
+		t.Fatalf("calls = %v, want single call to %s", calls, linebot.APIEndpointReplyMessage)
+	}
+}
