@@ -16,6 +16,9 @@ import (
 	"line-webhook/internal/handler"
 )
 
+// healthPath is the kubelet probe endpoint, excluded from the access log.
+const healthPath = "/health"
+
 type RouterOptions struct {
 	Echo      *echo.Echo
 	Config    *handler.Config
@@ -34,14 +37,24 @@ func NewRouter(opts RouterOptions) *echo.Echo {
 	}
 
 	// Middleware
-	e.Use(middleware.Logger())
+	// Skip the access log for kubelet probes: liveness (10s) + readiness (5s)
+	// is ~18 lines/min per pod of pure noise that buries real requests and
+	// keeps writing to the Raspberry Pi's SD card around the clock. The probe
+	// still runs - only its logging is dropped.
+	e.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
+		Format: middleware.DefaultLoggerConfig.Format,
+		Output: e.Logger.Output(),
+		Skipper: func(c echo.Context) bool {
+			return c.Request().URL.Path == healthPath
+		},
+	}))
 	e.Use(middleware.Recover())
 	e.Use(middleware.CORS())
 
 	// Routes
 	h := handler.New(opts.Config, opts.Publisher, opts.Sessions, opts.Images, opts.Profiles, opts.Bot)
 	// Health check
-	e.GET("/health", func(c echo.Context) error {
+	e.GET(healthPath, func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{
 			"status":  "ok",
 			"message": "LINE Bot Webhook Server is running",

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -221,4 +222,33 @@ func TestValidateSignatureMiddleware(t *testing.T) {
 			t.Errorf("restored body = %q, want %q", restored, body)
 		}
 	})
+}
+
+// TestNewRouterHealthCheckIsNotLogged guards the access log against kubelet
+// probe traffic. liveness (10s) + readiness (5s) is ~18 lines/min per pod of
+// pure noise, which on the Raspberry Pi node buries real requests and writes
+// to the SD card around the clock.
+func TestNewRouterHealthCheckIsNotLogged(t *testing.T) {
+	var buf bytes.Buffer
+	e := echo.New()
+	e.Logger.SetOutput(&buf)
+
+	r := NewRouter(RouterOptions{
+		Echo:      e,
+		Config:    &handler.Config{ChannelSecret: "secret", AIPrefix: "/ai"},
+		Publisher: fakePublisher{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	if buf.Len() != 0 {
+		t.Errorf("GET /health logged %q, want no output", buf.String())
+	}
+
+	// Everything else must still be logged.
+	req = httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader("{}"))
+	r.ServeHTTP(httptest.NewRecorder(), req)
+	if !strings.Contains(buf.String(), "/webhook") {
+		t.Errorf("POST /webhook logged %q, want an access-log line", buf.String())
+	}
 }
