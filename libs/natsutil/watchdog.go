@@ -22,6 +22,11 @@ const (
 	watchdogGrace = 90 * time.Second
 	// watchdogTick is how often the connection state is sampled.
 	watchdogTick = 15 * time.Second
+	// consumerWatchdogTick is how often a durable consumer's existence is
+	// re-verified. Coarser than watchdogTick: this defends against a rare
+	// race, not routine flapping, and each check is a JetStream API round
+	// trip against the shared server.
+	consumerWatchdogTick = 2 * time.Minute
 )
 
 // StartWatchdog exits the process if the NATS connection stays down past the
@@ -56,6 +61,46 @@ func StartWatchdog(nc *nats.Conn, closing *atomic.Bool) {
 					log.Error().Dur("down", time.Since(downSince)).Msg("nats: not connected past watchdog grace - exiting for restart")
 					os.Exit(1)
 				}
+			}
+		}
+	}()
+}
+
+// VerifyConsumer confirms the durable consumer for a line.chat.* subject
+// actually exists on the server.
+//
+// QueueSubscribe can report success locally - it opens the inbox
+// subscription before the server-side consumer create call - while that
+// create silently fails to persist, e.g. when several services redeploy at
+// once and race on the same memory-backed stream (observed in production:
+// three LINE pipeline services rolled within 90s of each other, and one came
+// up "subscribed - consumer running" bound to a durable the server never
+// actually created). The pod then looks healthy and drops every message
+// forever, since nothing ever gets pushed to an inbox no consumer feeds.
+// Call this right after Subscribe and treat any error as fatal - a
+// crash-loop that keeps retrying the create is far better than silent,
+// unbounded message loss.
+func VerifyConsumer(js nats.JetStreamContext, durable string) error {
+	_, err := js.ConsumerInfo(LineChatStream, durable)
+	return err
+}
+
+// StartConsumerWatchdog re-verifies durable's existence periodically and
+// exits the process if it ever disappears. This is defense in depth on top
+// of the startup check in VerifyConsumer: the trigger for the consumer
+// silently vanishing after a clean start isn't fully understood, so this
+// catches a recurrence rather than assuming the startup check is the whole
+// fix.
+func StartConsumerWatchdog(js nats.JetStreamContext, durable string, closing *atomic.Bool) {
+	go func() {
+		for {
+			time.Sleep(consumerWatchdogTick)
+			if closing.Load() {
+				return
+			}
+			if err := VerifyConsumer(js, durable); err != nil {
+				log.Error().Str("durable", durable).Err(err).Msg("nats: durable consumer missing - exiting for restart")
+				os.Exit(1)
 			}
 		}
 	}()
