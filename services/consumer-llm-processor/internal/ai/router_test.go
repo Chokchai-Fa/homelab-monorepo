@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"consumer-llm-processor/internal/store"
 )
@@ -361,5 +362,85 @@ func TestRouterImageGeneratorFailureReturnsError(t *testing.T) {
 
 	if _, err := r.Route(context.Background(), nil, "draw a cat", nil); err == nil {
 		t.Fatal("expected error when generator fails")
+	}
+}
+
+// shortenProviderTimeouts scales the per-attempt budgets down so the
+// timeout-driven tests below finish in milliseconds rather than seconds.
+// The ratio between them is what the tests exercise, not the real values.
+func shortenProviderTimeouts(t *testing.T) func() {
+	t.Helper()
+	oldPer, oldMin := perProviderTimeout, minProviderTimeout
+	perProviderTimeout, minProviderTimeout = 50*time.Millisecond, 10*time.Millisecond
+	return func() { perProviderTimeout, minProviderTimeout = oldPer, oldMin }
+}
+
+// slowProvider blocks until its context is cancelled, then returns that
+// context's error - exactly how a real provider behaves when its HTTP call
+// outlives the deadline.
+type slowProvider struct {
+	name  string
+	calls int
+}
+
+func (s *slowProvider) Name() string { return s.name }
+
+func (s *slowProvider) Reply(ctx context.Context, _ []store.Message, _ string, _ *Image) (string, error) {
+	s.calls++
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestRouterSlowProviderDoesNotStarveChain covers the production failure
+// where a request died with every provider reporting "context deadline
+// exceeded" in the same second: the whole chain shared one 60s budget, the
+// lead provider consumed all of it, and the remaining three were handed an
+// already-dead context and never made a real request. Each attempt must get
+// its own bounded slice so a slow leader only costs its own slot.
+func TestRouterSlowProviderDoesNotStarveChain(t *testing.T) {
+	restore := shortenProviderTimeouts(t)
+	defer restore()
+
+	slow := &slowProvider{name: "slow-leader"}
+	backup := &fakeProvider{name: "backup", answer: "backup-answer"}
+	r := newTestRouter(&fakeProvider{name: "classifier", answer: "technical"},
+		nil, nil, []Provider{slow, backup}, nil, nil)
+
+	// A budget well above perProviderTimeout: the chain has room for the
+	// fallback, but only if the leader is cut off rather than allowed to
+	// run out the whole thing.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*perProviderTimeout)
+	defer cancel()
+
+	got, err := r.Route(ctx, nil, "explain raft consensus", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Text != "backup-answer" {
+		t.Errorf("got %q, want backup-answer", got.Text)
+	}
+	if slow.calls != 1 || backup.calls != 1 {
+		t.Errorf("calls: slow=%d backup=%d, want 1 and 1", slow.calls, backup.calls)
+	}
+}
+
+// A parent deadline with almost nothing left must not start another attempt:
+// the request would only time out mid-flight and delay the fallback reply.
+func TestRouterSkipsProviderWhenBudgetNearlyGone(t *testing.T) {
+	restore := shortenProviderTimeouts(t)
+	defer restore()
+
+	slow := &slowProvider{name: "slow-leader"}
+	backup := &fakeProvider{name: "backup", answer: "backup-answer"}
+	r := newTestRouter(nil, nil, nil, []Provider{slow, backup}, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), minProviderTimeout/2)
+	defer cancel()
+
+	if _, err := r.Route(ctx, nil, "hello", nil); err == nil {
+		t.Fatal("expected an error when the budget is already spent")
+	}
+	if slow.calls != 0 || backup.calls != 0 {
+		t.Errorf("calls: slow=%d backup=%d, want no attempts started", slow.calls, backup.calls)
 	}
 }
